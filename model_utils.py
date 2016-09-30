@@ -138,56 +138,93 @@ def params_decay(decay):
 
 ### Nets ###
 
-# dnn
-def dnn(inputs, 
-        hid_size, 
-        out_size, 
-        num_layers, 
-        decay=0.99999, 
-        activation_fn=tf.nn.relu, 
-        is_training=True, 
-        reuse=None, 
-        scope=None):
+# ResDNN
+def ResDNN(inputs, 
+           out_size, 
+           num_layers, 
+           decay=0.99999, 
+           activation_fn=tf.nn.relu, 
+           is_training=True, 
+           reuse=None, 
+           scope=None):
   """ a deep neural net with fully connected layers
 
   """
-  with tf.variable_op_scope([inputs], scope, "dnn", reuse=reuse):
+  with tf.variable_op_scope([inputs], scope, "ResDNN", reuse=reuse):
+    # first layer
+    with tf.variable_scope("layer{0}".format(0)):
+      outputs = fully_connected(inputs, out_size, decay=decay, activation_fn=None, is_training=is_training)
+    # residual layers
     for i in xrange(num_layers-1):
-      # hid layers
-      with tf.variable_scope("layer{0}".format(i)):
-        inputs = fully_connected(inputs, hid_size, decay=decay, activation_fn=activation_fn, is_training=is_training)
-    # output layer
-    with tf.variable_scope("layer{0}".format(num_layers-1)):
-      outputs = fully_connected(inputs, out_size, decay=decay, is_training=is_training)
+      inputs = activation_fn(outputs)
+      with tf.variable_scope("layer{0}".format(i+1)):
+        outputs += fully_connected(inputs, out_size, decay=decay, activation_fn=None, is_training=is_training)
   return outputs
 
-# cnn
-def cnn(inputs, 
-        hid_size, 
-        out_size, 
-        num_layers, 
-        kernel_size, 
-        pool_size, 
-        decay=0.99999, 
-        activation_fn=tf.nn.relu, 
-        is_training=True, 
-        reuse=None, 
-        scope=None):
+# ResCNN
+def ResCNN(inputs, 
+           out_size, 
+           num_layers, 
+           kernel_size, 
+           pool_size, 
+           decay=0.99999, 
+           activation_fn=tf.nn.relu, 
+           is_training=True, 
+           reuse=None, 
+           scope=None):
   """ a convolutaional neural net with conv2d and max_pool layers
 
   """
-  with tf.variable_op_scope([inputs], scope, "cnn", reuse=reuse):
-    for i in xrange(num_layers):
-      with tf.variable_scope("layer{0}".format(i)):
-        inputs = convolution2d(activation_fn(inputs), hid_size, kernel_size, decay=decay, activation_fn=None, 
-            is_training=is_training) + inputs
-        if i != num_layers-1 and pool_size:
+  with tf.variable_op_scope([inputs], scope, "ResCNN", reuse=reuse):
+    # first layer
+    with tf.variable_scope("layer{0}".format(0)):
+      outputs = convolution2d(inputs, out_size, kernel_size, decay=decay, activation_fn=None, 
+          is_training=is_training)
+    # residual layers
+    for i in xrange(num_layers-1):
+      with tf.variable_scope("layer{0}".format(i+1)):
+        if pool_size:
           pool_shape = [1] + list(pool_size) + [1]
-          inputs = tf.nn.max_pool(inputs, pool_shape, pool_shape, padding='SAME')
-    return inputs
+          outputs = tf.nn.max_pool(outputs, pool_shape, pool_shape, padding='SAME')
+        inputs = activation_fn(outputs)
+        outputs += convolution2d(inputs, out_size, kernel_size, decay=decay, activation_fn=None, 
+            is_training=is_training)
+    return outputs
 
 
 ### RNN ###
+class GRUCell(tf.nn.rnn_cell.RNNCell):
+  """Gated Recurrent Unit cell (cf. http://arxiv.org/abs/1406.1078)."""
+
+  def __init__(self, num_units, input_size=None, activation=tf.tanh, linear=fully_connected):
+    if input_size is not None:
+      logging.warn("%s: The input_size parameter is deprecated.", self)
+    self._num_units = num_units
+    self._activation = activation
+    self._linear = linear
+
+  @property
+  def state_size(self):
+    return self._num_units
+
+  @property
+  def output_size(self):
+    return self._num_units
+
+  def __call__(self, inputs, state, scope=None):
+    """Gated recurrent unit (GRU) with nunits cells."""
+    with tf.variable_scope(scope or type(self).__name__):  # "GRUCell"
+      with tf.variable_scope("Gates"):  # Reset gate and update gate.
+        # We start with bias of 1.0 to not reset and not update.
+        r, u = tf.split(1, 2, self._linear(tf.concat(1, [inputs, state]),
+                                             2 * self._num_units))
+        r, u = tf.sigmoid(r), tf.sigmoid(u)
+      with tf.variable_scope("Candidate"):
+        c = self._activation(self._linear(tf.concat(1, [inputs, r * state]),
+                                     self._num_units))
+      new_h = u * state + (1 - u) * c
+    return new_h, new_h
+
 class newGRUCell(tf.nn.rnn_cell.RNNCell):
   """Gated Recurrent Unit cell (cf. http://arxiv.org/abs/1406.1078)."""
 
@@ -206,19 +243,20 @@ class newGRUCell(tf.nn.rnn_cell.RNNCell):
   def output_size(self):
     return self._num_units
 
-  def __call__(self, inputs, state, scope=None):
+  def __call__(self, inputs, state, scope="newGRUCell"):
     """Gated recurrent unit (GRU) with nunits cells."""
-    with tf.variable_scope(scope or type(self).__name__):  # "GRUCell"
+    with tf.variable_op_scope([inputs, state], scope, None, reuse=None):  # "GRUCell"
       with tf.variable_scope("InputGates"):
-        u = self._linear(state, self._num_units)
-        u = tf.sigmoid(u)
+        i = self._linear(state, self._num_units)
+        i = tf.sigmoid(i)
       with tf.variable_scope("ForgetGatesAndUpdates"):
         x = self._linear(inputs, 2 * self._num_units)
         c, f = tf.split(1, 2, x)
         c = self._activation(c)
         f = tf.sigmoid(f)
-      new_h = f * state + u * c
-    return new_h, new_h
+        update = state + i * c
+        new_h = f * update
+    return update - new_h, new_h
 
 def create_cell(size, num_layers, cell_type="GRU", decay=0.99999, is_training=True):
   # fully connected layers inside the rnn cell
@@ -227,7 +265,7 @@ def create_cell(size, num_layers, cell_type="GRU", decay=0.99999, is_training=Tr
  
   # build single cell
   if cell_type == "GRU":
-    single_cell = newGRUCell(size, activation=tf.nn.relu, linear=_linear)
+    single_cell = newGRUCell(size, activation=tf.tanh, linear=_linear)
   elif cell_type == "LSTM":
     single_cell = tf.nn.rnn_cell.LSTMCell(size, use_peepholes=True, cell_clip=5.0, num_proj=size)
   else:
@@ -244,11 +282,11 @@ def create_cell(size, num_layers, cell_type="GRU", decay=0.99999, is_training=Tr
 # greedy decoder
 def greedy_dec(length, 
                initial_state, 
-               context, 
+               memory, 
                iter_fn, 
                embedding, 
                beam_size=1, 
-               topn=1, 
+               num_candidates=1, 
                eos_id=2):
   """ A greedy decoder.
 
@@ -257,7 +295,7 @@ def greedy_dec(length,
   inputs_size = embedding.get_shape()[1].value
   inputs = tf.zeros([batch_size, inputs_size])
 
-  outputs, state = iter_fn(inputs, initial_state, context)
+  outputs, state = iter_fn(inputs, initial_state, memory)
   logits = tf.matmul(outputs, tf.transpose(embedding))
 
   symbol = tf.argmax(logits, 1)
@@ -267,7 +305,7 @@ def greedy_dec(length,
 
     inputs = tf.nn.relu(tf.nn.embedding_lookup(embedding, symbol))
 
-    outputs, state = iter_fn(inputs, state, context)
+    outputs, state = iter_fn(inputs, state, memory)
     logits = tf.matmul(outputs, tf.transpose(embedding))
 
     symbol = tf.argmax(logits, 1)
@@ -275,14 +313,13 @@ def greedy_dec(length,
 
   return tf.pack(seq, 1)
 
-# stochastic decoder
 def stochastic_dec(length,
                    initial_state,
-                   context,
+                   memory,
                    iter_fn,
                    embedding,
                    beam_size=1,
-                   topn=1,
+                   num_candidates=1,
                    eos_id=2):
   """ A stochastic decoder.
 
@@ -291,17 +328,24 @@ def stochastic_dec(length,
   inputs_size = embedding.get_shape()[1].value
   inputs = tf.zeros([batch_size, inputs_size])
 
-  outputs, state = iter_fn(inputs, initial_state, context)
+  outputs, state = iter_fn(inputs, initial_state, memory)
   logits = tf.matmul(outputs, tf.transpose(embedding))
 
-  symbol = tf.squeeze(tf.multinomial(logits, 1), [1])
+  symbol = tf.reshape(tf.multinomial(logits, num_candidates), [-1])
   seq = [symbol]
   tf.get_variable_scope().reuse_variables()
+  if isinstance(state, tuple):
+    state = tuple([tf.reshape(tf.pack([s]*num_candidates, axis=1), 
+        [batch_size*num_candidates, s.get_shape()[1].value]) for s in state])
+  else:
+    state = tf.reshape(tf.pack([state]*num_candidates, axis=1), 
+        [batch_size*num_candidates, state.get_shape()[1].value])
+
   for _ in xrange(length-1):
 
     inputs = tf.nn.relu(tf.nn.embedding_lookup(embedding, symbol))
 
-    outputs, state = iter_fn(inputs, state, context)
+    outputs, state = iter_fn(inputs, state, memory)
     logits = tf.matmul(outputs, tf.transpose(embedding))
 
     symbol = tf.squeeze(tf.multinomial(logits, 1), [1])
@@ -310,13 +354,13 @@ def stochastic_dec(length,
   return tf.pack(seq, 1)
 
 # beam decoder
-def beam_dec(length, 
-             initial_state, 
-             context, 
-             iter_fn, 
-             embedding, 
-             beam_size=100, 
-             topn=10, 
+def beam_dec(length,
+             initial_state,
+             memory,
+             iter_fn,
+             embedding,
+             beam_size=100,
+             num_candidates=10,
              eos_id=2):
   """ A basic beam decoder
 
@@ -328,16 +372,31 @@ def beam_dec(length,
   vocab_size = tf.shape(embedding)[0]
 
   # iter
-  outputs, state = iter_fn(inputs, initial_state, context)
+  outputs, state = iter_fn(inputs, initial_state, memory)
   logits = tf.matmul(outputs, tf.transpose(embedding))
 
   prev = tf.nn.log_softmax(logits)
-  probs = tf.reshape(prev, [-1])
+  probs = prev
   best_probs, indices = tf.nn.top_k(probs, beam_size)
 
   symbols = indices % vocab_size
   beam_parent = indices // vocab_size
+  beam_parent = tf.reshape(tf.expand_dims(tf.range(batch_size), 1) + beam_parent, [-1])
   paths = tf.reshape(symbols, [-1, 1])
+
+  if isinstance(memory, tuple):
+    memory_prime = []
+    for m in memory:
+      mdim = [d.value for d in m.get_shape()]
+      m = tf.expand_dims(m, 1)
+      memory_prime.append(tf.reshape(tf.tile(m, [1] + [beam_size] + [1]*(len(mdim)-1)),
+          [-1]+mdim[1:]))
+    memory = tuple(memory_prime)
+  else:
+    mdim = [d.value for d in memory.get_shape()]
+    memory = tf.expand_dims(memory, 1)
+    memory = tf.reshape(tf.tile(memory, [1] + [beam_size] + [1]*(len(mdim)-1)),
+        [-1]+mdim[1:])
 
   tf.get_variable_scope().reuse_variables()
   for _ in xrange(length-1):
@@ -346,31 +405,34 @@ def beam_dec(length,
       state = tuple([tf.gather(s, beam_parent) for s in state])
     else:
       state = tf.gather(state, beam_parent)
-    inputs = tf.nn.relu(tf.nn.embedding_lookup(embedding, symbols))
+
+    inputs = tf.reshape(tf.nn.relu(tf.nn.embedding_lookup(embedding, symbols)), [-1, inputs_size])
 
     # iter
-    outputs, state = iter_fn(inputs, state, tf.tile(context, [tf.shape(inputs)[0], 1]))
+    outputs, state = iter_fn(inputs, state, memory)
     logits = tf.matmul(outputs, tf.transpose(embedding))
 
-    prev = tf.nn.log_softmax(logits)
-    probs = tf.reshape(prev + tf.reshape(best_probs, [-1, 1]), [-1])
+    prev = tf.reshape(tf.nn.log_softmax(logits), [batch_size, beam_size, vocab_size])
+    probs = tf.reshape(prev + tf.expand_dims(best_probs, 2), [batch_size, -1])
     best_probs, indices = tf.nn.top_k(probs, beam_size)
 
     symbols = indices % vocab_size
     beam_parent = indices // vocab_size
+    beam_parent = tf.reshape(tf.expand_dims(tf.range(batch_size) * beam_size, 1) + beam_parent, [-1])
     paths = tf.gather(paths, beam_parent)
     paths = tf.concat(1, [paths, tf.reshape(symbols, [-1, 1])])
 
-  return tf.unpack(paths)[:topn]
+  return tf.reshape(tf.slice(tf.reshape(paths, [batch_size, beam_size, -1]), [0, 0, 0], [-1, num_candidates, -1]),
+      [batch_size*num_candidates, -1])
 
 # another beam decoder, likely better than the other one
 def beam_dec_v2(length, 
                 initial_state, 
-                context, 
+                memory, 
                 iter_fn, 
                 embedding, 
                 beam_size=100, 
-                topn=10, 
+                num_candidates=10, 
                 eos_id=2):
   """ A beam decoder. We keep monitoring the beam to add finished entries to the top lists
 
@@ -382,7 +444,7 @@ def beam_dec_v2(length,
   vocab_size = tf.shape(embedding)[0]
 
   # iter
-  outputs, state = iter_fn(inputs, initial_state, context)
+  outputs, state = iter_fn(inputs, initial_state, memory)
   logits = tf.matmul(outputs, tf.transpose(embedding))
 
   # pruning with beam
@@ -412,18 +474,18 @@ def beam_dec_v2(length,
     inputs = tf.nn.relu(tf.nn.embedding_lookup(embedding, symbols))
 
     # iter
-    if isinstance(context, tuple):
-      context_prime = []
-      for c in context:
-        cdim = [d.value for d in c.get_shape()]
-        context_prime.append(tf.reshape(tf.tile(c, [tf.shape(inputs)[0]] + [1]*(len(c.get_shape())-1)), 
-            [-1]+cdim[1:]))
-      context_prime = tuple(context_prime)
+    if isinstance(memory, tuple):
+      memory_prime = []
+      for m in memory:
+        mdim = [d.value for d in m.get_shape()]
+        memory_prime.append(tf.reshape(tf.tile(m, [tf.shape(inputs)[0]] + [1]*(len(m.get_shape())-1)), 
+            [-1]+mdim[1:]))
+      memory_prime = tuple(memory_prime)
     else:
-      cdim = [d.value for d in context.get_shape()]
-      context_prime = tf.reshape(tf.tile(context, [tf.shape(inputs)[0]] + [1]*(len(context.get_shape())-1)), 
-          [-1]+cdim[1:])
-    outputs, state = iter_fn(inputs, state, context_prime)
+      mdim = [d.value for d in memory.get_shape()]
+      memory_prime = tf.reshape(tf.tile(memory, [tf.shape(inputs)[0]] + [1]*(len(memory.get_shape())-1)), 
+          [-1]+mdim[1:])
+    outputs, state = iter_fn(inputs, state, memory_prime)
     logits = tf.matmul(outputs, tf.transpose(embedding))
 
     # prune
@@ -456,7 +518,7 @@ def beam_dec_v2(length,
   nbest_score = tf.concat(0, nbest_score)
   _, indices = tf.nn.top_k(nbest_score, beam_size)
   nbest_path = tf.gather(nbest_path, indices)
-  return tf.unpack(nbest_path)[:topn]
+  return tf.slice(nbest_path, [0, 0], [num_candidates, -1])
 
 
 ### Attention on Memory ###
@@ -472,7 +534,7 @@ def attention(query,
   values: [batch_size x length x dim]
   """
   query = tf.expand_dims(query, 1)
-  logits = convolution2d(tf.expand_dims(tf.nn.relu(query+keys), 1), 1, [1, 3], 
+  logits = convolution2d(tf.expand_dims(tf.nn.relu(query+keys), 1), 1, [1, 1], 
       is_training=is_training, scope="attention")
   logits = tf.squeeze(logits, [1, 3])
   results = tf.reduce_sum(tf.expand_dims(tf.nn.softmax(logits), 2) * values, [1])
@@ -488,32 +550,27 @@ def attention_iter(inputs, state, memory, cell, is_training):
                      % values.get_shape())
 
   attn_feat = state[0]
-  state = state[1:]
-  if len(state) == 1:
-    state = state[0]
+  cell_state = state[1]
   batch_size = tf.shape(inputs)[0]
   size = inputs.get_shape()[1].value
   mem_size = values.get_shape()[2].value
 
   with tf.variable_scope("attention_decoder"):
 
-    inputs = tf.concat(1, [inputs, attn_feat])
-    cell_outputs, state = cell(inputs, state)
+    with tf.variable_scope("dec_cell"):
+      cell_outputs, cell_state = cell(inputs, cell_state)
 
     with tf.variable_scope("query"):
-      state = tf.concat(1, list(state)) if isinstance(state, (tuple, list)) else state
-      query = fully_connected(state, mem_size, activation_fn=None, is_training=is_training)
+      cell_state_concat = tf.concat(1, list(cell_state)) if isinstance(cell_state, (tuple, list)) else cell_state
+      query = fully_connected(cell_state_concat, mem_size, activation_fn=None, is_training=is_training)
 
     with tf.variable_scope("attention"):
-      results = attention(query, keys, values, is_training)
+      attn_feat = attention(query, keys, values, is_training)
 
     with tf.variable_scope("output_proj"):
-      outputs = fully_connected(tf.concat(1, [cell_outputs, results]), size, activation_fn=None, 
-          is_training=is_training)
+      outputs = fully_connected(tf.concat(1, [cell_state_concat, attn_feat]), size, 
+          activation_fn=None, is_training=is_training)
 
-  if isinstance(state, tuple):
-    state = (attn_feat,) + state
-  else:
-    state = (attn_feat, state)
+    state = (attn_feat, cell_state)
 
   return outputs, state

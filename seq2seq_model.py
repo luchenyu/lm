@@ -89,7 +89,126 @@ class Seq2SeqModel(object):
       return batch_seq
 
     # The rnn classifier function: we use rnn to embed the query
-    def attention_ed(targets, is_decoding):
+    def lvm_lm(targets, is_decoding):
+
+      target_len = len(targets)
+      batch_size = tf.shape(targets[0])[0]
+
+      # embedding parameters
+      with tf.variable_scope("embed"):
+        char_embedding = tf.contrib.framework.model_variable("char_embedding",
+                                                             shape=[self.vocab_size, size],
+                                                             dtype=tf.float32,
+                                                             initializer=tf.truncated_normal_initializer(0.0, 0.01),
+                                                             collections=tf.GraphKeys.WEIGHTS,
+                                                             trainable=True)
+        latent_size = 10000
+        latent_embedding = tf.contrib.framework.model_variable("latent_embedding",
+                                                             shape=[latent_size, size],
+                                                             dtype=tf.float32,
+                                                             initializer=tf.truncated_normal_initializer(0.0, 0.01),
+                                                             collections=tf.GraphKeys.WEIGHTS,
+                                                             trainable=True)
+
+      # Create the internal multi-layer cell for our RNN.
+      cell = model_utils.create_cell(size, num_layers, cell_type, is_training=is_training)
+
+      with tf.variable_scope("encoder") as scope:
+        # encode the target seq
+        encoder_inputs = [tf.nn.embedding_lookup(char_embedding, i) for i in targets]
+        encoder_inputs = tf.expand_dims(tf.pack(encoder_inputs, 1), 1)
+        encoder_outputs = model_utils.cnn(encoder_inputs, size, size, 2, [1, 3], [1, 2], 
+            is_training=is_training, scope="cnn")
+        target_states = tf.squeeze(encoder_outputs, [1])
+        target_embed = tf.reduce_max(target_states, 1)
+
+      length = target_states.get_shape()[1].value
+
+      # Actor post
+      with tf.variable_scope("actor_post") as scope:
+        values = tf.nn.relu(target_states)
+        keys = model_utils.fully_connected(values, size, activation_fn=None, 
+            is_training=is_training, scope="keys")
+        memory = (keys, values)
+        state = (tf.zeros([batch_size, size]), target_embed)
+        inputs = tf.zeros([batch_size, size])
+        actor_post_probs = []
+        actor_post_samples = []
+        actor_post_log_probs = []
+        for _ in xrange(length):
+          inputs = tf.stop_gradient(inputs)
+          outputs, state = model_utils.attention_iter(inputs, state, memory, cell,
+              not is_decoding)
+          logits = tf.matmul(outputs, tf.stop_gradient(tf.transpose(latent_embedding)))
+          actor_post_probs.append(tf.nn.softmax(logits))
+          log_probs = tf.nn.log_softmax(logits)
+          sampleids = tf.squeeze(tf.multinomial(logits, 1), [1])
+          indices = tf.to_int64(tf.range(tf.shape(sampleids)[0])) * latent_size + sampleids
+          actor_post_log_probs.append(tf.gather(tf.reshape(log_probs, [-1]), indices))
+          samples = tf.nn.embedding_lookup(latent_embedding, sampleids)
+          actor_post_samples.append(samples)
+          inputs = tf.nn.relu(samples)
+          scope.reuse_variables()
+
+      # Actor prior
+      with tf.variable_scope("actor_prior") as scope:
+        memory = (tf.zeros([batch_size, 1, size]), tf.zeros([batch_size, 1, size]))
+        state = (tf.zeros([batch_size, size]), tf.zeros([batch_size, size]))
+        inputs = tf.zeros([batch_size, size])
+        actor_prior_samples = []
+        loss_prior = 0.0
+        for i in xrange(length):
+          inputs = tf.stop_gradient(inputs)
+          outputs, state = model_utils.attention_iter(inputs, state, memory, cell,
+              not is_decoding)
+          logits = tf.matmul(outputs, tf.stop_gradient(tf.transpose(latent_embedding)))
+          if self.is_decoding:
+            sampleids = tf.squeeze(tf.multinomial(logits, 1), [1])
+            samples = tf.nn.embedding_lookup(latent_embedding, sampleids)
+            actor_prior_samples.append(samples)
+            inputs = tf.nn.relu(samples)
+          else:
+            loss_prior += tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(logits,
+                tf.stop_gradient(actor_post_probs[i])))
+            inputs = tf.nn.relu(actor_post_samples[i])
+          scope.reuse_variables()
+
+      # Generator
+      with tf.variable_scope("decoder") as scope:
+        actor_samples = actor_prior_samples if self.is_decoding else actor_post_samples
+        actor_samples = tf.pack(actor_samples, axis=1)
+        values = tf.nn.relu(actor_samples)
+        keys = model_utils.fully_connected(values, size, is_training=not is_decoding, 
+            scope = "keys")
+        memory = (keys, values)
+        state = (tf.zeros([batch_size, size]), tf.zeros([batch_size, size]))
+        if self.is_decoding:
+          iter_fn = lambda inputs, state, memory: model_utils.attention_iter(inputs, state, memory, cell, 
+              not is_decoding)
+          outputs = model_utils.beam_dec_v2(target_len, state, memory, iter_fn, char_embedding, 
+              beam_size=1000, topn=100)
+          return outputs
+        else:
+          decoder_inputs = [tf.zeros([batch_size, size])]
+          decoder_inputs += [tf.nn.relu(tf.nn.embedding_lookup(char_embedding, i)) for i in targets[:-1]]
+          decoder_outputs = []
+          for inputs in decoder_inputs:
+            outputs, state = model_utils.attention_iter(inputs, state, memory, cell,
+                not is_decoding)
+            decoder_outputs.append(outputs)
+            scope.reuse_variables()
+          logits = tf.unpack(tf.reshape(tf.matmul(tf.concat(0, decoder_outputs), 
+              tf.transpose(char_embedding)), [target_len, batch_size, self.vocab_size]))
+          losses = tf.nn.seq2seq.sequence_loss_by_example(logits, targets,
+              [tf.ones([batch_size])] * len(logits), True)
+          loss_generator = tf.reduce_mean(losses)
+          loss_post = tf.reduce_mean(-sum(actor_post_log_probs) * tf.stop_gradient(tf.exp(-losses)))
+          loss_prior = loss_prior / float(length)
+          return loss_prior + loss_post + loss_generator
+
+
+    # The basic lm
+    def reinforce_lm(targets, is_decoding):
 
       length = len(targets)
       batch_size = tf.shape(targets[0])[0]
@@ -101,98 +220,97 @@ class Seq2SeqModel(object):
                                                              initializer=tf.truncated_normal_initializer(0.0, 0.01),
                                                              collections=tf.GraphKeys.WEIGHTS,
                                                              trainable=True)
-        latent_embedding = tf.contrib.framework.model_variable("latent_embedding",
-                                                             shape=[10000, size],
+      # Create the internal multi-layer cell for our RNN.
+      cell = model_utils.create_cell(size, num_layers, cell_type, is_training=is_training)
+
+      with tf.variable_scope("decoder") as scope:
+        memory = (tf.zeros([2*batch_size, 1, size]), tf.zeros([2*batch_size, 1, size]))
+        state = tuple([tf.zeros([2*batch_size, size])] * (num_layers+1))
+        inputs = tf.zeros([2*batch_size, size])
+        samples = []
+        log_probs = []
+        loss_xe = 0.0
+        for i in xrange(length):
+          outputs, state = model_utils.attention_iter(inputs, state, memory, cell, 
+              not is_decoding)
+          logits = tf.matmul(outputs, tf.transpose(char_embedding))
+          logits_target, logits_sample = tf.split(0, 2, logits)
+          loss_xe += tf.reduce_mean(tf.nn.sparse_softmax_cross_entropy_with_logits(logits_target, targets[i]))
+          sampleids = tf.to_int32(tf.squeeze(tf.multinomial(logits_sample, 1), [1]))
+          indices = tf.range(tf.shape(sampleids)[0]) * self.vocab_size + sampleids
+          log_probs.append(tf.gather(tf.reshape(tf.nn.log_softmax(logits_sample), [-1]), indices))
+          samples.append(sampleids)
+          inputs = tf.nn.relu(tf.nn.embedding_lookup(char_embedding, tf.concat(0, [targets[i], sampleids])))
+          scope.reuse_variables()
+
+      with tf.variable_scope("critic") as scope:
+        encoder_inputs = [tf.concat(0, [tf.nn.embedding_lookup(char_embedding, x) 
+            for x in [targets[i], samples[i]]]) for i in xrange(length)]
+        encoder_inputs = tf.stop_gradient(tf.expand_dims(tf.pack(encoder_inputs, 1), 1))
+        encoder_outputs = model_utils.ResCNN(encoder_inputs, size, 2, [1, 3], [1, 2], 
+            is_training=is_training, scope="ResCNN")
+        encoder_states = tf.squeeze(encoder_outputs, [1])
+        encoder_embeds = tf.reduce_max(encoder_states, 1)
+        embed_proj = model_utils.ResDNN(tf.nn.relu(encoder_embeds), size, 2, is_training=not is_decoding, 
+            scope="embed_proj")
+        logits = tf.squeeze(model_utils.fully_connected(tf.nn.relu(embed_proj), 1, is_training=not is_decoding, 
+            scope="logits"), [1])
+
+      if self.is_decoding:
+        return tf.pack(samples, axis=1)
+      else:
+        targets = tf.concat(0, [tf.ones([batch_size]), -tf.ones([batch_size])])
+        loss_critic = 0.5 * tf.reduce_mean(tf.square(tf.tanh(logits) - targets))
+        _, logits = tf.split(0, 2, logits)
+        reward = tf.tanh(logits)
+        loss_pg = tf.reduce_mean(-sum(log_probs) * tf.stop_gradient(reward))
+        return loss_critic + loss_pg + loss_xe
+
+    # The basic lm
+    def basic_lm(targets, is_decoding):
+
+      length = len(targets)
+      batch_size = tf.shape(targets[0])[0]
+      # embedding parameters
+      with tf.variable_scope("embed"):
+        char_embedding = tf.contrib.framework.model_variable("char_embedding",
+                                                             shape=[self.vocab_size, size],
                                                              dtype=tf.float32,
                                                              initializer=tf.truncated_normal_initializer(0.0, 0.01),
                                                              collections=tf.GraphKeys.WEIGHTS,
                                                              trainable=True)
       # Create the internal multi-layer cell for our RNN.
-      cell = model_utils.create_cell(size, 1, cell_type, is_training=is_training)
-      # embed words
-      encoder_inputs = [tf.nn.embedding_lookup(char_embedding, i) for i in targets]
-
-      with tf.variable_scope("encoder") as scope:
-        # cnn encoder
-        inputs = tf.expand_dims(tf.pack(encoder_inputs, 1), 1)
-        encoder_outputs = model_utils.cnn(inputs, size, size, 2, [1, 3], [1, 2], 
-            is_training=is_training, scope="cnn")
-        values = tf.nn.relu(tf.squeeze(encoder_outputs, [1]))
-        keys = model_utils.fully_connected(values, size, activation_fn=None, 
-            is_training=is_training, scope="keys")
-        memory = (keys, values)
-        inputs = tf.zeros([batch_size, size])
-        latent_outputs_post = []
-        latent_prob_post = []
-        state = (tf.zeros([batch_size, size]), tf.zeros([batch_size, size]))
-        with tf.variable_scope("latent") as scope:
-          loss_kl = 0.0
-          for _ in xrange(int(length/2)):
-            outputs, state = model_utils.attention_iter(inputs, state, memory, cell, is_training)
-            logits = tf.matmul(outputs, tf.transpose(latent_embedding))
-            ids = tf.squeeze(tf.multinomial(logits, 1), [1])
-            inputs = tf.nn.relu(tf.nn.embedding_lookup(latent_embedding, ids))
-            prob = tf.nn.softmax(logits)
-            if not is_decoding:
-              loss_kl += -tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(logits, prob))
-            latent_outputs_post.append(tf.nn.relu(tf.matmul(prob, latent_embedding)))
-            latent_prob_post.append(prob)
-            scope.reuse_variables()
+      cell = model_utils.create_cell(size, num_layers, cell_type, is_training=is_training)
 
       with tf.variable_scope("decoder") as scope:
-        with tf.variable_scope("latent") as scope:
-          inputs = tf.zeros([batch_size, size])
-          state = tf.zeros([batch_size, size])
-          latent_outputs_prior = []
-          for i in xrange(int(length/2)):
-            outputs, state = cell(inputs, state)
-            logits = tf.matmul(outputs, tf.transpose(latent_embedding))
-            if is_decoding:
-              ids = tf.squeeze(tf.multinomial(logits, 1), [1])
-              inputs = tf.nn.relu(tf.nn.embedding_lookup(latent_embedding, ids))
-              prob = tf.nn.softmax(logits)
-              latent_outputs_prior.append(tf.nn.relu(tf.matmul(prob, latent_embedding)))
-            else:
-              loss_kl += tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(logits, latent_prob_post[i]))
-              inputs = latent_outputs_post[i]
+        iter_fn = lambda inputs, state, memory: model_utils.attention_iter(inputs, state, memory, cell, 
+            is_training)
+        # output the target sequence
+        if is_decoding:
+          decoder = model_utils.stochastic_dec
+          memory = (tf.zeros([batch_size, 1, size]), tf.zeros([batch_size, 1, size]))
+          state = tuple([tf.zeros([batch_size, size])] * (num_layers+1))
+          outputs = decoder(length, state, memory, iter_fn, 
+              char_embedding, topn=1)
+          return outputs
+        # output the xent loss
+        else:
+          memory = (tf.zeros([batch_size, 1, size]), tf.zeros([batch_size, 1, size]))
+          decoder_inputs = [tf.zeros([batch_size, size])]
+          decoder_inputs += [tf.nn.relu(tf.nn.embedding_lookup(char_embedding, i)) for i in targets[:-1]]
+          decoder_outputs = []
+          state = tuple([tf.zeros([batch_size, size])] * (num_layers+1))
+          for inputs in decoder_inputs:
+            outputs, state = iter_fn(inputs, state, memory)
+            decoder_outputs.append(outputs)
             scope.reuse_variables()
-        with tf.variable_scope("generator") as scope:
-          iter_fn = lambda inputs, state, memory: model_utils.attention_iter(inputs, state, memory, cell, 
-              is_training)
-          # output the target sequence
-          if is_decoding:
-            decoder = model_utils.stochastic_dec
-            values = tf.pack(latent_outputs_prior, axis=1)
-            keys = model_utils.fully_connected(values, size, activation_fn=None, 
-                is_training=is_training, scope="keys")
-            memory = (keys, values)
-            state = (tf.zeros([batch_size, size]), tf.zeros([batch_size, size]))
-            outputs = decoder(length, state, memory, iter_fn, 
-                char_embedding, topn=1)
-            return outputs
-          # output the xent loss
-          else:
-            values = tf.pack(latent_outputs_post, axis=1)
-            keys = model_utils.fully_connected(values, size, activation_fn=None, 
-                is_training=is_training, scope="keys")
-            memory = (keys, values)
-            decoder_inputs = [tf.zeros([batch_size, size])]
-            decoder_inputs += [tf.nn.relu(tf.nn.embedding_lookup(char_embedding, i)) for i in targets[:-1]]
-            decoder_outputs = []
-            state = (tf.zeros([batch_size, size]), tf.zeros([batch_size, size]))
-            for inputs in decoder_inputs:
-              outputs, state = iter_fn(inputs, state, memory)
-              decoder_outputs.append(outputs)
-              scope.reuse_variables()
-            logits = tf.matmul(tf.concat(0, decoder_outputs), tf.transpose(char_embedding))
-            logits = tf.unpack(tf.reshape(logits, [length, -1, self.vocab_size]))
-            loss_xe = tf.nn.seq2seq.sequence_loss(logits, targets, [tf.ones([batch_size])]*length, False, True)
-            return loss_kl+loss_xe
+          logits = tf.matmul(tf.concat(0, decoder_outputs), tf.transpose(char_embedding))
+          logits = tf.unpack(tf.reshape(logits, [length, -1, self.vocab_size]))
+          loss_xe = tf.nn.seq2seq.sequence_loss(logits, targets, [tf.ones([batch_size])]*length, False, True)
+          return loss_xe
 
 
-    # Feeds for inputs.
-
-    model = attention_ed
+    model = reinforce_lm
     # build the buckets
     self.outputs, self.losses, self.updates = [], [], []
     for i in xrange(len(buckets)):
