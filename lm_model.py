@@ -42,6 +42,8 @@ class LM_Model(object):
                  learning_rate, global_step, training,
                  vocab_size, vocab_dim,
                  size, num_layers, max_gradient,
+                 embedding_init=None,
+                 dropout=0.0,
                  cell_type="LSTM",
                  scope="lm"):
         """Create the model.
@@ -75,17 +77,26 @@ class LM_Model(object):
             seq_length = tf.shape(seqs)[1]
 
             with tf.variable_scope("embed"):
+                if type(embedding_init) == np.ndarray:
+                    initializer = tf.initializers.constant(embedding_init)
+                else:
+                    initializer = tf.initializers.truncated_normal(0.0, 0.01)
                 char_embedding = tf.get_variable(
                     "char_embedding",
                     shape=[self.vocab_size, self.vocab_dim],
                     dtype=tf.float32,
-                    initializer=tf.initializers.truncated_normal(0.0, 0.01),
+                    initializer=initializer,
                     trainable=True,
                     collections=[tf.GraphKeys.GLOBAL_VARIABLES, tf.GraphKeys.WEIGHTS])
                 input_embedding = tf.concat([tf.zeros([1, self.vocab_dim]), char_embedding[1:]], axis=0)
                 output_embedding = char_embedding
                 char_embeds = tf.nn.embedding_lookup(input_embedding, seqs)
                 padded_seqs = tf.pad(seqs, [[0,0], [2,2]])
+                if dropout > 0.0:
+                    padded_seqs = tf.where(
+                        tf.less(tf.random_uniform(tf.shape(padded_seqs)), dropout),
+                        tf.zeros(tf.shape(padded_seqs), dtype=tf.int32),
+                        padded_seqs)
                 inputs = tf.nn.embedding_lookup(input_embedding, padded_seqs)
 
             with tf.variable_scope("bilstm"):
@@ -113,14 +124,24 @@ class LM_Model(object):
                     self.vocab_dim,
                     is_training=self.training,
                     scope="output_proj")
+                outputs_gate = model_utils.fully_connected(
+                    outputs,
+                    self.vocab_dim,
+                    activation_fn=tf.sigmoid,
+                    is_training=self.training,
+                    scope="output_gate")
                 logits = tf.matmul(
-                    tf.reshape(outputs_proj, [(seq_length+2)*batch_size, self.vocab_dim]),
+                    tf.reshape(outputs_proj*outputs_gate, [(seq_length+2)*batch_size, self.vocab_dim]),
                     output_embedding,
                     transpose_b=True)
                 logits = tf.reshape(logits, [seq_length+2, batch_size, self.vocab_size])
                 logits_valid = tf.reshape(tf.transpose(logits[1:-1], [1, 0, 2]), [-1, self.vocab_size])
-                sample_seqs = tf.multinomial(logits_valid, 1, output_dtype=tf.int32)
-                sample_seqs = tf.reshape(sample_seqs, [batch_size, seq_length])
+                logits_valid = tf.reshape(tf.nn.log_softmax(logits_valid), [batch_size, seq_length*self.vocab_size])
+                samples = tf.multinomial(logits_valid, 1, output_dtype=tf.int32)
+                sample_posits = tf.one_hot(tf.squeeze(samples // self.vocab_size, 1), seq_length,
+                    on_value=True, off_value=False, dtype=tf.bool)
+                sample_ids = tf.tile(samples % self.vocab_size, [1, seq_length])
+                sample_seqs = tf.where(sample_posits, sample_ids, seqs)
                 logits = tf.transpose(logits, [1, 0, 2])
                 labels = tf.pad(seqs, [[0,0], [1,1]])
                 weights = tf.pad(tf.to_float(tf.not_equal(seqs, 0)), [[0,0], [2,0]], constant_values=1.0)

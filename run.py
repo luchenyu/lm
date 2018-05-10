@@ -57,6 +57,7 @@ tf.app.flags.DEFINE_integer("vocab_size", 10000, "vocabulary size.")
 tf.app.flags.DEFINE_integer("vocab_dim", 512, "Size of embedding.")
 tf.app.flags.DEFINE_string("data_dir", "./text_corpus", "Data directory")
 tf.app.flags.DEFINE_string("train_dir", "./model", "Training directory.")
+tf.app.flags.DEFINE_string("embedding_files", "./embeddings/glove.txt", "Pretrained embedding files.")
 tf.app.flags.DEFINE_integer("steps_per_checkpoint", 10000,
                             "How many training steps to do per checkpoint.")
 tf.app.flags.DEFINE_integer("steps_limit", 2000000,
@@ -83,7 +84,7 @@ def create_train_graph(session, vocab):
         trainable=False)
     cycle = tf.floor(1.0 + tf.to_float(global_step) / (FLAGS.clr_period))
     learning_rate = (
-            1e-2*FLAGS.learning_rate + (FLAGS.learning_rate - 1e-2*FLAGS.learning_rate)*
+            1e-1*FLAGS.learning_rate + (FLAGS.learning_rate - 1e-1*FLAGS.learning_rate)*
             tf.maximum((
                 1.0-tf.abs(tf.to_float(global_step) / tf.to_float(FLAGS.clr_period // 2)
                     - 2.0*cycle + 1.0)), 0))
@@ -105,6 +106,24 @@ def create_train_graph(session, vocab):
         FLAGS.batch_size,
         data_paths)
 
+    """Load pretrained embeddings."""
+    word2vecs = []
+    w2v_sizes = []
+    for path in FLAGS.embedding_files.split(','):
+        word2vecs.append(data_utils.FastWord2vec(path))
+        w2v_sizes.append(word2vecs[-1].syn0.shape[1])
+    embedding_init = np.random.normal(0.0, 0.01, (FLAGS.vocab_size, FLAGS.vocab_dim))
+    for idx, word in enumerate(vocab.vocab_list[:vocab.size()]):
+        ptr = 0
+        for i, word2vec in enumerate(word2vecs):
+            try:
+                hit = word2vec[word]
+                embedding_init[idx, ptr:ptr+w2v_sizes[i]] = hit
+            except:
+                pass
+            finally:
+                ptr += w2v_sizes[i]
+
     """Create language model and initialize or load parameters in session."""
     model = lm_model.LM_Model(
         session,
@@ -113,7 +132,9 @@ def create_train_graph(session, vocab):
         learning_rate, global_step, training,
         FLAGS.vocab_size, FLAGS.vocab_dim,
         FLAGS.size, FLAGS.num_layers, FLAGS.max_gradient,
-        FLAGS.cell_type)
+        embedding_init=embedding_init,
+        dropout=0.2,
+        cell_type=FLAGS.cell_type)
     return dataset, model
 
 def create_infer_graph(session, vocab):
@@ -130,7 +151,7 @@ def create_infer_graph(session, vocab):
         None, None, training,
         FLAGS.vocab_size, FLAGS.vocab_dim,
         FLAGS.size, FLAGS.num_layers, FLAGS.max_gradient,
-        FLAGS.cell_type)
+        cell_type=FLAGS.cell_type)
     return seqs_placeholder, model
 
 def train():
