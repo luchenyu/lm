@@ -45,14 +45,11 @@ from utils import data_utils
 import lm_dataset, lm_model
 
 tf.app.flags.DEFINE_float("learning_rate", 0.0001, "Learning rate.")
-tf.app.flags.DEFINE_integer("clr_period", 100000, "Period of cyclic learning rate.")
-tf.app.flags.DEFINE_float("max_gradient", 5.0,
-                          "Clip gradients to this norm.")
+tf.app.flags.DEFINE_integer("clr_period", 10000, "Period of cyclic learning rate.")
 tf.app.flags.DEFINE_integer("batch_size", 128,
                             "Batch size to use during training.")
 tf.app.flags.DEFINE_integer("size", 256, "Size of each model layer.")
 tf.app.flags.DEFINE_integer("num_layers", 2, "Number of layers in the model.")
-tf.app.flags.DEFINE_string("cell_type", "GRU", "GRU|LSTM")
 tf.app.flags.DEFINE_integer("vocab_size", 10000, "vocabulary size.")
 tf.app.flags.DEFINE_integer("vocab_dim", 512, "Size of embedding.")
 tf.app.flags.DEFINE_string("data_dir", "./text_corpus", "Data directory")
@@ -75,27 +72,6 @@ FLAGS = tf.app.flags.FLAGS
 
 
 def create_train_graph(session, vocab):
-
-    global_step = tf.get_variable(
-        "global_step",
-        shape=[],
-        dtype=tf.int32,
-        initializer=tf.initializers.constant(0),
-        trainable=False)
-    cycle = tf.floor(1.0 + tf.to_float(global_step) / (FLAGS.clr_period))
-    learning_rate = (
-            1e-1*FLAGS.learning_rate + (FLAGS.learning_rate - 1e-1*FLAGS.learning_rate)*
-            tf.maximum((
-                1.0-tf.abs(tf.to_float(global_step) / tf.to_float(FLAGS.clr_period // 2)
-                    - 2.0*cycle + 1.0)), 0))
-    training = tf.get_variable(
-        "training",
-        shape=[],
-        dtype=tf.bool,
-        initializer=tf.initializers.constant(True),
-        trainable=False)
-
-    session.run(tf.global_variables_initializer())
 
     data_paths = {
         'train': [os.path.join(FLAGS.data_dir, "train"), 'repeat'],
@@ -129,17 +105,15 @@ def create_train_graph(session, vocab):
         session,
         FLAGS.train_dir,
         dataset.next_batch,
-        learning_rate, global_step, training,
+        True,
         FLAGS.vocab_size, FLAGS.vocab_dim,
-        FLAGS.size, FLAGS.num_layers, FLAGS.max_gradient,
+        FLAGS.size, FLAGS.num_layers,
         embedding_init=embedding_init,
         dropout=0.2,
-        cell_type=FLAGS.cell_type)
+        learning_rate=FLAGS.learning_rate, clr_period=FLAGS.clr_period)
     return dataset, model
 
 def create_infer_graph(session, vocab):
-
-    training = False
 
     seqs_placeholder = tf.placeholder(tf.int32, shape=[None, None])
 
@@ -148,10 +122,9 @@ def create_infer_graph(session, vocab):
         session,
         FLAGS.train_dir,
         seqs_placeholder,
-        None, None, training,
+        False,
         FLAGS.vocab_size, FLAGS.vocab_dim,
-        FLAGS.size, FLAGS.num_layers, FLAGS.max_gradient,
-        cell_type=FLAGS.cell_type)
+        FLAGS.size, FLAGS.num_layers)
     return seqs_placeholder, model
 
 def train():
