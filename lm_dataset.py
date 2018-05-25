@@ -37,7 +37,6 @@ class LM_Dataset(object):
     """
 
     def __init__(self,
-                 session,
                  vocab,
                  batch_size,
                  data_paths):
@@ -52,7 +51,6 @@ class LM_Dataset(object):
             seq = vocab.sentence_to_token_ids(text)
             return np.array(seq, dtype=np.int32)
 
-        self.handles = {}
         self.iterators = {}
         for key in data_paths:
             data_path, mode = data_paths[key]
@@ -69,14 +67,23 @@ class LM_Dataset(object):
             dataset = dataset.prefetch(buffer_size=100)
             iterator = dataset.make_initializable_iterator()
             self.iterators[key] = iterator
-            handle = session.run(iterator.string_handle())
-            self.handles[key] = handle
-            session.run(iterator.initializer)
 
         self.handle = tf.placeholder(tf.string, shape=[])
         iterator = tf.data.Iterator.from_string_handle(
             self.handle, dataset.output_types, dataset.output_shapes)
         self.next_batch = iterator.get_next()
+
+    def init(self, session):
+        """Initialize the dataset graph
+
+        """
+
+        self.handles = {}
+        for key in self.iterators:
+            iterator = self.iterators[key]
+            handle = session.run(iterator.string_handle())
+            self.handles[key] = handle
+            session.run(iterator.initializer)
 
     def reset(self, session, key):
         """Reset the given iterator

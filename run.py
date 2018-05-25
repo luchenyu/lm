@@ -57,7 +57,7 @@ tf.app.flags.DEFINE_string("train_dir", "./model", "Training directory.")
 tf.app.flags.DEFINE_string("embedding_files", "./embeddings/glove.txt", "Pretrained embedding files.")
 tf.app.flags.DEFINE_integer("steps_per_checkpoint", 10000,
                             "How many training steps to do per checkpoint.")
-tf.app.flags.DEFINE_integer("steps_limit", 2000000,
+tf.app.flags.DEFINE_integer("steps_limit", 10000000,
                             "How many steps to train")
 tf.app.flags.DEFINE_integer("gpu_id", 0, "Select which gpu to use.")
 tf.app.flags.DEFINE_boolean("test", False,
@@ -77,40 +77,22 @@ def create_train_graph(session, vocab):
         'train': [os.path.join(FLAGS.data_dir, "train"), 'repeat'],
         'valid': [os.path.join(FLAGS.data_dir, "dev"), 'one-shot']}
     dataset = lm_dataset.LM_Dataset(
-        session,
         vocab,
         FLAGS.batch_size,
         data_paths)
-
-    """Load pretrained embeddings."""
-    word2vecs = []
-    w2v_sizes = []
-    for path in FLAGS.embedding_files.split(','):
-        word2vecs.append(data_utils.FastWord2vec(path))
-        w2v_sizes.append(word2vecs[-1].syn0.shape[1])
-    embedding_init = np.random.normal(0.0, 0.01, (FLAGS.vocab_size, FLAGS.vocab_dim))
-    for idx, word in enumerate(vocab.vocab_list[:vocab.size()]):
-        ptr = 0
-        for i, word2vec in enumerate(word2vecs):
-            try:
-                hit = word2vec[word]
-                embedding_init[idx, ptr:ptr+w2v_sizes[i]] = hit
-            except:
-                pass
-            finally:
-                ptr += w2v_sizes[i]
+    dataset.init(session)
 
     """Create language model and initialize or load parameters in session."""
     model = lm_model.LM_Model(
-        session,
-        FLAGS.train_dir,
         dataset.next_batch,
         True,
         FLAGS.vocab_size, FLAGS.vocab_dim,
         FLAGS.size, FLAGS.num_layers,
-        embedding_init=embedding_init,
+        embedding_init=vocab.embedding_init,
         dropout=0.2,
         learning_rate=FLAGS.learning_rate, clr_period=FLAGS.clr_period)
+    model.init(session, FLAGS.train_dir)
+
     return dataset, model
 
 def create_infer_graph(session, vocab):
@@ -119,12 +101,12 @@ def create_infer_graph(session, vocab):
 
     """Create language model and initialize or load parameters in session."""
     model = lm_model.LM_Model(
-        session,
-        FLAGS.train_dir,
         seqs_placeholder,
         False,
         FLAGS.vocab_size, FLAGS.vocab_dim,
         FLAGS.size, FLAGS.num_layers)
+    model.init(session, FLAGS.train_dir)
+
     return seqs_placeholder, model
 
 def train():
@@ -132,8 +114,12 @@ def train():
     """Train a language model."""
     with tf.Session(config=tf.ConfigProto(allow_soft_placement=True)) as sess:
         # Read data into buckets and compute their sizes.
-        vocab = data_utils.Vocab(os.path.join(FLAGS.data_dir, "vocab"))
+        vocab = data_utils.Vocab(
+            os.path.join(FLAGS.data_dir, "vocab"),
+            embedding_files=FLAGS.embedding_files)
         FLAGS.vocab_size = vocab.size()
+        if FLAGS.embedding_files != "":
+            FLAGS.vocab_dim = vocab.embedding_init.shape[1]
 
         # Create model.
         with tf.device('/gpu:{0}'.format(FLAGS.gpu_id)):
@@ -183,8 +169,12 @@ def sample():
     """Sample a language model."""
     with tf.Session(config=tf.ConfigProto(allow_soft_placement=True)) as sess:
         # Read data into buckets and compute their sizes.
-        vocab = data_utils.Vocab(os.path.join(FLAGS.data_dir, "vocab"))
+        vocab = data_utils.Vocab(
+            os.path.join(FLAGS.data_dir, "vocab"),
+            embedding_files=FLAGS.embedding_files)
         FLAGS.vocab_size = vocab.size()
+        if FLAGS.embedding_files != "":
+            FLAGS.vocab_dim = vocab.embedding_init.shape[1]
 
         # Create model.
         with tf.device('/gpu:{0}'.format(FLAGS.gpu_id)):
@@ -217,8 +207,12 @@ def test():
     """Train a language model."""
     with tf.Session(config=tf.ConfigProto(allow_soft_placement=True)) as sess:
         # Read data into buckets and compute their sizes.
-        vocab = data_utils.Vocab(os.path.join(FLAGS.data_dir, "vocab"))
+        vocab = data_utils.Vocab(
+            os.path.join(FLAGS.data_dir, "vocab"),
+            embedding_files=FLAGS.embedding_files)
         FLAGS.vocab_size = vocab.size()
+        if FLAGS.embedding_files != "":
+            FLAGS.vocab_dim = vocab.embedding_init.shape[1]
 
         # Create model.
         with tf.device('/gpu:{0}'.format(FLAGS.gpu_id)):

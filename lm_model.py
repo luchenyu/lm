@@ -36,8 +36,6 @@ class LM_Model(object):
     """
 
     def __init__(self,
-                 session,
-                 model_dir,
                  seqs,
                  trainable,
                  vocab_size, vocab_dim,
@@ -45,6 +43,7 @@ class LM_Model(object):
                  embedding_init=None,
                  dropout=0.0,
                  learning_rate=0.001, clr_period=10000,
+                 reuse=None,
                  scope="lm"):
         """Create the model.
 
@@ -67,7 +66,7 @@ class LM_Model(object):
         self.vocab_size = vocab_size
         self.vocab_dim = vocab_dim
 
-        with tf.variable_scope(scope) as sc:
+        with tf.variable_scope(scope, reuse=reuse) as sc:
 
             """ Training flag """
             collections = [tf.GraphKeys.GLOBAL_VARIABLES]
@@ -121,116 +120,129 @@ class LM_Model(object):
                     output_embedding = char_embedding
                     padded_seqs = tf.pad(seqs, [[0,0], [2,2]])
                     if dropout > 0.0:
-                        padded_seqs = tf.where(
-                            tf.less(tf.random_uniform(tf.shape(padded_seqs)), dropout),
+                        noise_seqs = tf.where(
+                            tf.less(tf.random_uniform(tf.shape(padded_seqs)), 0.5),
                             tf.zeros(tf.shape(padded_seqs), dtype=tf.int32),
+                            tf.random_uniform(tf.shape(padded_seqs), maxval=self.vocab_size, dtype=tf.int32))
+                        corrupt_seqs = tf.where(
+                            tf.less(tf.random_uniform(tf.shape(padded_seqs)), dropout),
+                            noise_seqs,
                             padded_seqs)
+                    else:
+                        corrupt_seqs = padded_seqs
                     inputs = tf.nn.embedding_lookup(input_embedding, padded_seqs)
+                    corrupt_inputs = tf.nn.embedding_lookup(input_embedding, corrupt_seqs)
 
                 with tf.variable_scope("encode"):
-                    inputs = tf.transpose(inputs, [1, 0, 2])
+                    lstms = []
                     for i in range(num_layers):
-                        lstm = tf.contrib.cudnn_rnn.CudnnLSTM(
-                            num_layers=1,
-                            num_units=size,
-                            direction="bidirectional")
-                        outputs, states = lstm(inputs, training=trainable)
-                        if trainable:
-                            for var in lstm.trainable_variables:
-                                tf.add_to_collection(
-                                    tf.GraphKeys.WEIGHTS,
-                                    var)
-                        projs = model_utils.fully_connected(
-                            outputs,
-                            inputs.get_shape()[-1].value+32,
-                            is_training=self.training,
-                            scope="projs_"+str(i))
-                        gates = model_utils.fully_connected(
-                            outputs,
-                            inputs.get_shape()[-1].value+32,
-                            activation_fn=tf.sigmoid,
-                            is_training=self.training,
-                            scope="gates_"+str(i))
-                        switchs = model_utils.fully_connected(
-                            outputs,
-                            inputs.get_shape()[-1].value+32,
-                            activation_fn=tf.sigmoid,
-                            is_training=self.training,
-                            scope="switchs_"+str(i))
-                        inputs = (1.0 - switchs) * gates*projs + \
-                            switchs * tf.concat([inputs, tf.zeros([seq_length+4, batch_size, 32])], axis=-1)
-                    encodes = tf.transpose(inputs[2:-2], [1, 0, 2])
+                        with tf.variable_scope("layer_"+str(i)):
+                            lstms.append(model_utils.cudnn_lstm(
+                                num_layers=1,
+                                num_units=size,
+                                direction="bidirectional",
+                                input_shape=tf.TensorShape([None, None, self.vocab_dim+i*32]),
+                                trainable=trainable))
+                    def encode(inputs):
+                        inputs = tf.transpose(inputs, [1, 0, 2])
+                        for i in range(num_layers):
+                            outputs, states = lstms[i](inputs, training=trainable)
+                            glu_feats = model_utils.GLU(
+                                outputs,
+                                inputs.get_shape()[-1].value+32,
+                                is_training=self.training,
+                                scope="glu_feats_"+str(i))
+                            switchs = model_utils.fully_connected(
+                                outputs,
+                                inputs.get_shape()[-1].value+32,
+                                activation_fn=tf.sigmoid,
+                                is_training=self.training,
+                                scope="switchs_"+str(i))
+                            inputs = (1.0 - switchs) * glu_feats + \
+                                switchs * tf.concat([inputs, tf.zeros([seq_length+4, batch_size, 32])], axis=-1)
+                        encodes = tf.transpose(inputs, [1, 0, 2])
+                        return encodes
+                    encoder_outputs = encode(inputs)
+                    encodes = encoder_outputs[:,2:-2]
+                    tf.get_variable_scope().reuse_variables()
+                    corrupt_encoder_outputs = encode(corrupt_inputs)
 
                 with tf.variable_scope("lm"):
-                    if dropout > 0.0:
-                        inputs = tf.nn.dropout(
-                            inputs,
-                            max(0.0, 1.0-dropout))
-                    lstm = tf.contrib.cudnn_rnn.CudnnLSTM(
+                    inputs = tf.transpose(corrupt_encoder_outputs, [1, 0, 2])
+                    lstm = model_utils.cudnn_lstm(
                         num_layers=1,
                         num_units=size,
-                        direction="bidirectional")
+                        direction="bidirectional",
+                        input_shape=tf.TensorShape([None,None,inputs.get_shape()[-1].value]),
+                        trainable=trainable)
                     outputs, states = lstm(inputs, training=trainable)
-                    if trainable:
-                        for var in lstm.trainable_variables:
-                            tf.add_to_collection(
-                                tf.GraphKeys.WEIGHTS,
-                                var)
                     outputs_fw, outputs_bw = tf.split(outputs, 2, axis=2)
                     outputs = tf.concat([outputs_fw[:-2], outputs_bw[2:]], axis=-1)
-                    outputs_proj = model_utils.fully_connected(
+                    outputs = model_utils.GLU(
+                        outputs,
+                        inputs.get_shape()[-1].value,
+                        is_training=self.training,
+                        scope="outputs_pred")
+                    outputs = tf.transpose(outputs, [1, 0, 2])
+                    weights = tf.pad(tf.to_float(tf.not_equal(seqs, 0)), [[0,0], [2,0]], constant_values=1.0)
+                    targets = encoder_outputs[:,1:-1]
+                    loss_mse = 0.5 * tf.reduce_sum(
+                        weights*tf.reduce_sum(tf.square(outputs - targets), axis=-1)) / \
+                        tf.reduce_sum(weights)
+                    outputs = model_utils.GLU(
                         outputs,
                         self.vocab_dim,
                         is_training=self.training,
-                        scope="outputs_proj")
-                    outputs_gate = model_utils.fully_connected(
-                        outputs,
-                        self.vocab_dim,
-                        activation_fn=tf.sigmoid,
-                        is_training=self.training,
-                        scope="outputs_gate")
-                    outputs = outputs_proj*outputs_gate
+                        scope="outputs_vocab")
                     logits = tf.matmul(
-                        tf.reshape(outputs, [(seq_length+2)*batch_size, self.vocab_dim]),
+                        tf.reshape(outputs, [batch_size*(seq_length+2), self.vocab_dim]),
                         output_embedding,
                         transpose_b=True)
-                    logits = tf.reshape(logits, [seq_length+2, batch_size, self.vocab_size])
-                    logits_valid = tf.reshape(tf.transpose(logits[1:-1], [1, 0, 2]), [-1, self.vocab_size])
-                    logits_valid = tf.reshape(tf.nn.log_softmax(logits_valid), [batch_size, seq_length*self.vocab_size])
+                    logits = tf.reshape(logits, [batch_size, seq_length+2, self.vocab_size])
+                    logits_valid = tf.reshape(
+                        tf.nn.log_softmax(logits[:,1:-1]),
+                        [batch_size, seq_length*self.vocab_size])
                     samples = tf.multinomial(logits_valid, 1, output_dtype=tf.int32)
                     sample_posits = tf.one_hot(tf.squeeze(samples // self.vocab_size, 1), seq_length,
                         on_value=True, off_value=False, dtype=tf.bool)
                     sample_ids = tf.tile(samples % self.vocab_size, [1, seq_length])
                     sample_seqs = tf.where(sample_posits, sample_ids, seqs)
-                    logits = tf.transpose(logits, [1, 0, 2])
                     labels = tf.pad(seqs, [[0,0], [1,1]])
-                    weights = tf.pad(tf.to_float(tf.not_equal(seqs, 0)), [[0,0], [2,0]], constant_values=1.0)
-                    loss = tf.losses.sparse_softmax_cross_entropy(
+                    loss_ce = tf.losses.sparse_softmax_cross_entropy(
                         labels,
                         logits,
                         weights=weights)
-                return loss, encodes, sample_seqs
+                return loss_ce+loss_mse, encodes, sample_seqs
 
             model = bi_lm
 
             self.loss, self.encodes, self.sample_seqs = model(
                 self.seqs)
             if trainable:
+                self.trainable_variables = sc.trainable_variables()
+                self.optimizer = tf.train.AdamOptimizer(
+                    learning_rate=learning_rate)
                 self.update = model_utils.optimize_loss(
                     self.loss,
                     self.global_step,
-                    self.learning_rate,
-                    'Adam')
+                    self.optimizer,
+                    self.trainable_variables)
 
-            self.saver = tf.train.Saver(sc.global_variables())
+            self.global_variables = sc.global_variables()
+            self.saver = tf.train.Saver(self.global_variables)
 
-            ckpt = tf.train.get_checkpoint_state(model_dir)
-            if ckpt and tf.gfile.Exists(ckpt.model_checkpoint_path+'.meta'):
-                print("Reading model parameters from %s" % ckpt.model_checkpoint_path)
-                self.saver.restore(session, ckpt.model_checkpoint_path)
-            else:
-                print("Created model with fresh parameters. ")
-                session.run(tf.variables_initializer(sc.global_variables()))
+    def init(self, session, model_dir=''):
+        """Initialize the model graph.
+
+        """
+
+        ckpt = tf.train.get_checkpoint_state(model_dir)
+        if ckpt and tf.gfile.Exists(ckpt.model_checkpoint_path+'.meta'):
+            print("Reading model parameters from %s" % ckpt.model_checkpoint_path)
+            self.saver.restore(session, ckpt.model_checkpoint_path)
+        else:
+            print("Created model with fresh parameters. ")
+            session.run(tf.variables_initializer(self.global_variables))
 
     def train_one_step(self, session, input_feed, do_profiling=False):
         """Run a step of the model feeding the given inputs.
