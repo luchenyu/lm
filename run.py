@@ -52,6 +52,7 @@ tf.app.flags.DEFINE_integer("size", 256, "Size of each model layer.")
 tf.app.flags.DEFINE_integer("num_layers", 2, "Number of layers in the model.")
 tf.app.flags.DEFINE_integer("vocab_size", 10000, "vocabulary size.")
 tf.app.flags.DEFINE_integer("vocab_dim", 512, "Size of embedding.")
+tf.app.flags.DEFINE_string("block_type", "lstm", "Block type: lstm|transformer")
 tf.app.flags.DEFINE_string("data_dir", "./text_corpus", "Data directory")
 tf.app.flags.DEFINE_string("train_dir", "./model", "Training directory.")
 tf.app.flags.DEFINE_string("embedding_files", "./embeddings/glove.txt", "Pretrained embedding files.")
@@ -64,6 +65,8 @@ tf.app.flags.DEFINE_boolean("test", False,
                             "Run a test on the eval set.")
 tf.app.flags.DEFINE_boolean("sample", False,
                             "Run a sample using the model.")
+tf.app.flags.DEFINE_boolean("posseg", False,
+                            "Run a seg using the model.")
 
 FLAGS = tf.app.flags.FLAGS
 
@@ -71,23 +74,29 @@ FLAGS = tf.app.flags.FLAGS
 # See seq2seq_model.Seq2SeqModel for details of how they work.
 
 
-def create_train_graph(session, vocab):
+def create_train_graph(session, vocab, posseg_vocab):
 
     data_paths = {
         'train': [os.path.join(FLAGS.data_dir, "train"), 'repeat'],
         'valid': [os.path.join(FLAGS.data_dir, "dev"), 'one-shot']}
     dataset = lm_dataset.LM_Dataset(
         vocab,
+        posseg_vocab,
         FLAGS.batch_size,
         data_paths)
     dataset.init(session)
 
     """Create language model and initialize or load parameters in session."""
+    seqs, segs, pos_labels = dataset.next_batch
     model = lm_model.LM_Model(
-        dataset.next_batch,
+        seqs,
         True,
         FLAGS.vocab_size, FLAGS.vocab_dim,
         FLAGS.size, FLAGS.num_layers,
+        segs=segs,
+        pos_labels=pos_labels,
+        num_pos_tags=posseg_vocab.size(),
+        block_type=FLAGS.block_type,
         embedding_init=vocab.embedding_init,
         dropout=0.2,
         learning_rate=FLAGS.learning_rate, clr_period=FLAGS.clr_period)
@@ -95,7 +104,7 @@ def create_train_graph(session, vocab):
 
     return dataset, model
 
-def create_infer_graph(session, vocab):
+def create_infer_graph(session, vocab, posseg_vocab):
 
     seqs_placeholder = tf.placeholder(tf.int32, shape=[None, None])
 
@@ -104,7 +113,8 @@ def create_infer_graph(session, vocab):
         seqs_placeholder,
         False,
         FLAGS.vocab_size, FLAGS.vocab_dim,
-        FLAGS.size, FLAGS.num_layers)
+        FLAGS.size, FLAGS.num_layers,
+        block_type=FLAGS.block_type)
     model.init(session, FLAGS.train_dir)
 
     return seqs_placeholder, model
@@ -120,10 +130,14 @@ def train():
         FLAGS.vocab_size = vocab.size()
         if FLAGS.embedding_files != "":
             FLAGS.vocab_dim = vocab.embedding_init.shape[1]
+        posseg_vocab = data_utils.Vocab(
+            os.path.join(data_utils.__location__, 'pos_vocab'))
 
         # Create model.
         with tf.device('/gpu:{0}'.format(FLAGS.gpu_id)):
-            dataset, model = create_train_graph(sess, vocab)
+            dataset, model = create_train_graph(sess, vocab, posseg_vocab)
+        checkpoint_path = os.path.join(FLAGS.train_dir, "lm.ckpt")
+        model.saver.save(sess, checkpoint_path, global_step=model.global_step)
 
         # This is the training loop.
         step_time, loss = 0.0, 0.0
@@ -175,29 +189,78 @@ def sample():
         FLAGS.vocab_size = vocab.size()
         if FLAGS.embedding_files != "":
             FLAGS.vocab_dim = vocab.embedding_init.shape[1]
+        posseg_vocab = data_utils.Vocab(
+            os.path.join(data_utils.__location__, 'pos_vocab'))
 
         # Create model.
         with tf.device('/gpu:{0}'.format(FLAGS.gpu_id)):
-            seqs_placeholder, model = create_infer_graph(sess, vocab)
+            seqs_placeholder, model = create_infer_graph(sess, vocab, posseg_vocab)
 
-        sample_len = 20
         sys.stdout.write("> ")
         sys.stdout.flush()
         sentence = sys.stdin.readline()
-        sample_seqs = np.array([[0]*sample_len])
+        text = ''
         while sentence:
             sentence = sentence.strip()
-            if sentence != '':
-                sample_seqs = vocab.sentence_to_token_ids(sentence)
-                sample_seqs = sample_seqs[:sample_len]
-                sample_seqs += [0]*(sample_len-len(sample_seqs))
-                sample_seqs = np.array([sample_seqs])
+            if sentence == '':
+                sentence = text
+            sample_seqs = vocab.sentence_to_token_ids(sentence)
+            sample_seqs = np.array([sample_seqs+[0]])
             # This is the training loop.
             input_feed = {seqs_placeholder.name: sample_seqs}
             sample_seqs = model.sample_one_step(sess, input_feed)
             token_ids = list(sample_seqs[0])
             text = vocab.token_ids_to_sentence(token_ids)
+            text = ''.join(text.split())
             print(text)
+            print("> ")
+            sys.stdout.flush()
+            sentence = sys.stdin.readline()
+
+def posseg():
+
+    """Seg a language model."""
+    with tf.Session(config=tf.ConfigProto(allow_soft_placement=True)) as sess:
+        # Read data into buckets and compute their sizes.
+        vocab = data_utils.Vocab(
+            os.path.join(FLAGS.data_dir, "vocab"),
+            embedding_files=FLAGS.embedding_files)
+        FLAGS.vocab_size = vocab.size()
+        if FLAGS.embedding_files != "":
+            FLAGS.vocab_dim = vocab.embedding_init.shape[1]
+        posseg_vocab = data_utils.Vocab(
+            os.path.join(data_utils.__location__, 'pos_vocab'))
+
+        # Create model.
+        with tf.device('/gpu:{0}'.format(FLAGS.gpu_id)):
+            seqs_placeholder, model = create_infer_graph(sess, vocab, posseg_vocab)
+
+        sample_len = 20
+        sys.stdout.write("> ")
+        sys.stdout.flush()
+        sentence = sys.stdin.readline()
+        while sentence:
+            sentence = sentence.strip()
+            sample_seqs = vocab.sentence_to_token_ids(sentence)
+            sample_seqs = np.array([sample_seqs])
+            # This is the training loop.
+            input_feed = {seqs_placeholder.name: sample_seqs}
+            segs, pos_labels = model.tag_one_step(sess, input_feed)
+            segs = list(segs[0])[1:]
+            pos_labels = list(pos_labels[0])
+            pos_labels = map(lambda i: posseg_vocab.idx2key(i), pos_labels)
+            charlist = list(sentence.decode('utf-8'))
+            charlist.reverse()
+            pos_labels.reverse()
+            possegs = []
+            word = []
+            length = len(charlist)
+            for i in range(length):
+                word.append(charlist.pop())
+                if segs[i] > 0.0 or i == length-1:
+                    possegs.append((''.join(word).encode('utf-8'), pos_labels.pop()))
+                    word = []
+            print(possegs)
             print("> ")
             sys.stdout.flush()
             sentence = sys.stdin.readline()
@@ -213,10 +276,12 @@ def test():
         FLAGS.vocab_size = vocab.size()
         if FLAGS.embedding_files != "":
             FLAGS.vocab_dim = vocab.embedding_init.shape[1]
+        posseg_vocab = data_utils.Vocab(
+            os.path.join(data_utils.__location__, 'pos_vocab'))
 
         # Create model.
         with tf.device('/gpu:{0}'.format(FLAGS.gpu_id)):
-            dataset, model = create_train_graph(sess, vocab)
+            dataset, model = create_train_graph(sess, vocab, posseg_vocab)
 
         sys.stdout.write("> ")
         sys.stdout.flush()
@@ -233,6 +298,8 @@ def main(_):
         test()
     elif FLAGS.sample:
         sample()
+    elif FLAGS.posseg:
+        posseg()
     else:
         train()
 

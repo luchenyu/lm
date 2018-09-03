@@ -1,10 +1,6 @@
 
-To run the training:
-  >python run.py
-
-To run the testing:
-  >python run.py --test
-
-To do interactive testing:
-  >python run.py --interactive-test
-
+lm model
+objective:
+1. learn the word segmentation
+2. learn the pos tagging
+3. learn the language model

@@ -27,6 +27,7 @@ import tensorflow as tf
 from tensorflow.python.client import timeline
 
 from utils import data_utils, model_utils
+import uniout
 
 
 
@@ -38,6 +39,7 @@ class LM_Dataset(object):
 
     def __init__(self,
                  vocab,
+                 posseg_vocab,
                  batch_size,
                  data_paths):
         """Create the dataset.
@@ -46,24 +48,31 @@ class LM_Dataset(object):
             data_dir: path to the data files
         """
 
+        self.cutter = data_utils.Cutter()
         def __sentence_to_token_ids(text):
             text = text.strip()
-            seq = vocab.sentence_to_token_ids(text)
-            return np.array(seq, dtype=np.int32)
+            pos_segs = self.cutter.cut_words(text)
+            seqs, segs, pos_labels = data_utils.posseg_to_token_ids(pos_segs, vocab, posseg_vocab)
+            return np.array(seqs,dtype=np.int32),np.array(segs,dtype=np.float32),np.array(pos_labels,dtype=np.int32)
 
         self.iterators = {}
         for key in data_paths:
             data_path, mode = data_paths[key]
-            dataset = tf.data.TextLineDataset([data_path])
+            if os.path.isdir(data_path):
+                filenames = map(lambda i: os.path.join(data_path, i), os.listdir(data_path))
+                random.shuffle(filenames)
+            else:
+                filenames = [data_path]
+            dataset = tf.data.TextLineDataset(filenames)
             dataset = dataset.map(
-                lambda text: tf.py_func(__sentence_to_token_ids, [text], tf.int32),
-                num_parallel_calls=64)
+                lambda text: tf.py_func(__sentence_to_token_ids, [text], [tf.int32, tf.float32, tf.int32]),
+                num_parallel_calls=48)
             dataset = dataset.prefetch(buffer_size=10000)
             if mode == "repeat":
-                dataset = dataset.filter(lambda seq: tf.less(tf.shape(seq)[0], 50))
+                dataset = dataset.filter(lambda seqs, segs, pos_labels: tf.less(tf.shape(seqs)[0], 50))
                 dataset = dataset.repeat()
-                dataset = dataset.shuffle(buffer_size=1000000)
-            dataset = dataset.padded_batch(batch_size, padded_shapes=[None])
+                dataset = dataset.shuffle(buffer_size=50000)
+            dataset = dataset.padded_batch(batch_size, padded_shapes=([None], [None], [None]))
             dataset = dataset.prefetch(buffer_size=100)
             iterator = dataset.make_initializable_iterator()
             self.iterators[key] = iterator
