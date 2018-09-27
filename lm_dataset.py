@@ -51,6 +51,7 @@ class LM_Dataset(object):
         self.cutter = data_utils.Cutter()
         def __sentence_to_token_ids(text):
             text = text.strip()
+            text = data_utils.normalize(text)
             pos_segs = self.cutter.cut_words(text)
             seqs, segs, pos_labels = data_utils.posseg_to_token_ids(pos_segs, vocab, posseg_vocab)
             return np.array(seqs,dtype=np.int32),np.array(segs,dtype=np.float32),np.array(pos_labels,dtype=np.int32)
@@ -66,10 +67,10 @@ class LM_Dataset(object):
             dataset = tf.data.TextLineDataset(filenames)
             dataset = dataset.map(
                 lambda text: tf.py_func(__sentence_to_token_ids, [text], [tf.int32, tf.float32, tf.int32]),
-                num_parallel_calls=48)
+                num_parallel_calls=64)
             dataset = dataset.prefetch(buffer_size=10000)
             if mode == "repeat":
-                dataset = dataset.filter(lambda seqs, segs, pos_labels: tf.less(tf.shape(seqs)[0], 50))
+                dataset = dataset.filter(lambda seqs, segs, pos_labels: tf.less(tf.shape(seqs)[0], 100))
                 dataset = dataset.repeat()
                 dataset = dataset.shuffle(buffer_size=50000)
             dataset = dataset.padded_batch(batch_size, padded_shapes=([None], [None], [None]))

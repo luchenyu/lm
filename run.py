@@ -38,27 +38,31 @@ import sys
 import time
 
 import numpy as np
+np.set_printoptions(threshold=np.nan)
 from six.moves import xrange  # pylint: disable=redefined-builtin
 import tensorflow as tf
 
 from utils import data_utils
 import lm_dataset, lm_model
 
-tf.app.flags.DEFINE_float("learning_rate", 0.0001, "Learning rate.")
-tf.app.flags.DEFINE_integer("clr_period", 10000, "Period of cyclic learning rate.")
-tf.app.flags.DEFINE_integer("batch_size", 128,
+tf.app.flags.DEFINE_float("learning_rate", 0.001, "Learning rate.")
+tf.app.flags.DEFINE_integer("clr_period", 100000, "Period of cyclic learning rate.")
+tf.app.flags.DEFINE_integer("batch_size", 64,
                             "Batch size to use during training.")
+tf.app.flags.DEFINE_float("dropout", 0.1, "Dropout rate.")
 tf.app.flags.DEFINE_integer("size", 256, "Size of each model layer.")
-tf.app.flags.DEFINE_integer("num_layers", 2, "Number of layers in the model.")
+tf.app.flags.DEFINE_integer("num_layers", 3, "Number of layers in the model.")
 tf.app.flags.DEFINE_integer("vocab_size", 10000, "vocabulary size.")
-tf.app.flags.DEFINE_integer("vocab_dim", 512, "Size of embedding.")
-tf.app.flags.DEFINE_string("block_type", "lstm", "Block type: lstm|transformer")
+tf.app.flags.DEFINE_integer("vocab_dim", 100, "Size of embedding.")
+tf.app.flags.DEFINE_string("block_type", "transformer2", "Block type: lstm|transformer")
+tf.app.flags.DEFINE_string("decoder_type", "attn", "Decoder type: lstm|attn")
+tf.app.flags.DEFINE_string("loss_type", "unsup", "Loss type: sup|unsup")
 tf.app.flags.DEFINE_string("data_dir", "./text_corpus", "Data directory")
 tf.app.flags.DEFINE_string("train_dir", "./model", "Training directory.")
-tf.app.flags.DEFINE_string("embedding_files", "./embeddings/glove.txt", "Pretrained embedding files.")
-tf.app.flags.DEFINE_integer("steps_per_checkpoint", 10000,
+tf.app.flags.DEFINE_string("embedding_files", "./embeddings/char_100.txt", "Pretrained embedding files.")
+tf.app.flags.DEFINE_integer("steps_per_checkpoint", 20000,
                             "How many training steps to do per checkpoint.")
-tf.app.flags.DEFINE_integer("steps_limit", 10000000,
+tf.app.flags.DEFINE_integer("steps_limit", 100000000,
                             "How many steps to train")
 tf.app.flags.DEFINE_integer("gpu_id", 0, "Select which gpu to use.")
 tf.app.flags.DEFINE_boolean("test", False,
@@ -97,8 +101,10 @@ def create_train_graph(session, vocab, posseg_vocab):
         pos_labels=pos_labels,
         num_pos_tags=posseg_vocab.size(),
         block_type=FLAGS.block_type,
+        decoder_type=FLAGS.decoder_type,
+        loss_type=FLAGS.loss_type,
         embedding_init=vocab.embedding_init,
-        dropout=0.2,
+        dropout=FLAGS.dropout,
         learning_rate=FLAGS.learning_rate, clr_period=FLAGS.clr_period)
     model.init(session, FLAGS.train_dir)
 
@@ -114,7 +120,9 @@ def create_infer_graph(session, vocab, posseg_vocab):
         False,
         FLAGS.vocab_size, FLAGS.vocab_dim,
         FLAGS.size, FLAGS.num_layers,
-        block_type=FLAGS.block_type)
+        block_type=FLAGS.block_type,
+        decoder_type=FLAGS.decoder_type,
+        loss_type=FLAGS.loss_type)
     model.init(session, FLAGS.train_dir)
 
     return seqs_placeholder, model
@@ -148,7 +156,8 @@ def train():
         while True:
             start_time = time.time()
             input_feed = {dataset.handle: dataset.handles['train']}
-            step_loss = model.train_one_step(sess, input_feed)
+            output_feed = [model.loss, model.update]
+            step_loss, _ = model.step(sess, input_feed, output_feed, training=True)
             step_time += (time.time() - start_time) / FLAGS.steps_per_checkpoint
             loss += step_loss / FLAGS.steps_per_checkpoint
             current_step += 1
@@ -162,9 +171,10 @@ def train():
                 # Run evals on development set and print their perplexity.
                 eval_losses = []
                 input_feed = {dataset.handle:dataset.handles['valid']}
+                output_feed = model.loss
                 try:
                     while True:
-                        eval_losses.append(model.valid_one_step(sess, input_feed))
+                        eval_losses.append(model.step(sess, input_feed, output_feed, training=False))
                 except:
                     dataset.reset(sess, 'valid')
                 eval_loss = sum(eval_losses) / len(eval_losses)
@@ -203,15 +213,17 @@ def sample():
         while sentence:
             sentence = sentence.strip()
             if sentence == '':
-                sentence = text
+                sentence = ''.join(text.split())
+            sentence = data_utils.normalize(sentence)
             sample_seqs = vocab.sentence_to_token_ids(sentence)
             sample_seqs = np.array([sample_seqs+[0]])
             # This is the training loop.
             input_feed = {seqs_placeholder.name: sample_seqs}
-            sample_seqs = model.sample_one_step(sess, input_feed)
+            output_feed = [model.encodes, model.sample_seqs]
+            encodes, sample_seqs = model.step(sess, input_feed, output_feed, training=False)
+            print(map(lambda x: np.sum(x, axis=-1), np.split(encodes,2,axis=-1)))
             token_ids = list(sample_seqs[0])
             text = vocab.token_ids_to_sentence(token_ids)
-            text = ''.join(text.split())
             print(text)
             print("> ")
             sys.stdout.flush()
@@ -240,25 +252,26 @@ def posseg():
         sys.stdout.flush()
         sentence = sys.stdin.readline()
         while sentence:
-            sentence = sentence.strip()
+            sentence = data_utils.normalize(sentence.strip())
             sample_seqs = vocab.sentence_to_token_ids(sentence)
             sample_seqs = np.array([sample_seqs])
             # This is the training loop.
             input_feed = {seqs_placeholder.name: sample_seqs}
-            segs, pos_labels = model.tag_one_step(sess, input_feed)
+            output_feed = model.segs
+            segs = model.step(sess, input_feed, output_feed, training=False)
             segs = list(segs[0])[1:]
-            pos_labels = list(pos_labels[0])
-            pos_labels = map(lambda i: posseg_vocab.idx2key(i), pos_labels)
+           # pos_labels = list(pos_labels[0])
+           # pos_labels = map(lambda i: posseg_vocab.idx2key(i), pos_labels)
+           # pos_labels.reverse()
             charlist = list(sentence.decode('utf-8'))
             charlist.reverse()
-            pos_labels.reverse()
             possegs = []
             word = []
             length = len(charlist)
             for i in range(length):
                 word.append(charlist.pop())
                 if segs[i] > 0.0 or i == length-1:
-                    possegs.append((''.join(word).encode('utf-8'), pos_labels.pop()))
+                    possegs.append((''.join(word).encode('utf-8'), ))#pos_labels.pop()))
                     word = []
             print(possegs)
             print("> ")
