@@ -524,58 +524,88 @@ class LM_Model(object):
                         idxs = tf.pad(segment_idxs, [[0,0],[0,1]], constant_values=-1)
                         length = tf.shape(idxs)[1]
 
-                        pad_num = tf.mod(10 - tf.mod(length, 10), 10)
-                        seqs = tf.pad(seqs, [[0,0],[0,pad_num]])
-                        idxs = tf.pad(idxs, [[0,0],[0,pad_num]], constant_values=-1)
-                        weights = tf.pad(weights, [[0,0],[0,pad_num]])
-                        new_length = tf.shape(idxs)[1]
-                        inputs = tf.nn.embedding_lookup(input_embedding, seqs[:,:-1])
-                        num_splits = tf.div(tf.to_int32(new_length), tf.to_int32(10))
+                        def not_slice():
+                            inputs = tf.nn.embedding_lookup(input_embedding, seqs[:,:-1])
+                            labels = seqs[:,1:]
+                            encode_masks = tf.one_hot(idxs, max_word_seq_length, dtype=tf.int32)
+                            encode_masks = tf.cast(encode_masks, tf.bool)
+                            if decoder_type == "attn":
+                                dec_inputs = tf.TensorArray(tf.float32, 0,
+                                    dynamic_size=True, clear_after_read=False, infer_shape=False)
+                                initial_state = (dec_inputs, contexts, encode_masks)
+                                outputs, state = attn_decoder(inputs, initial_state)
+                            outputs = tf.reshape(outputs, [batch_size*length, size])
+                            logits = logit_fn(outputs)
+                            logits = tf.reshape(
+                                logits, [batch_size, length, self.vocab_size])
+                            losses = tf.nn.sparse_softmax_cross_entropy_with_logits(
+                                labels=labels, logits=logits)
+                            loss_per_sample_a = tf.reduce_sum(losses*weights, axis=1)
+                            return loss_per_sample_a
 
-                        weights_splitted = tf.reshape(
-                            weights, [batch_size, num_splits, 10])
-                        masks = tf.greater(
-                            tf.reduce_sum(weights_splitted, axis=2), 0)
-                        weights = tf.boolean_mask(weights_splitted, masks)
-                        idxs_splitted = tf.reshape(
-                            idxs, [batch_size, num_splits, 10])
-                        idxs_starts = tf.maximum(idxs_splitted[:,:,0], 0)
-                        idxs_ends = tf.reduce_max(idxs_splitted, axis=2)
-                        idxs_lengths = idxs_ends - idxs_starts + 1
-                        contexts_splitted = model_utils.slice_fragments(
-                            contexts, idxs_starts, idxs_lengths)
-                        contexts = tf.boolean_mask(contexts_splitted, masks)
-                        max_word_seq_length = tf.shape(contexts)[1]
-                        idxs_splitted -= tf.maximum(idxs_splitted[:,:,0:1], 0)
-                        idxs = tf.boolean_mask(idxs_splitted, masks)
-                        encode_masks = tf.one_hot(idxs, max_word_seq_length, dtype=tf.int32)
-                        encode_masks = tf.cast(encode_masks, tf.bool)
-                        batch_ids_splitted = tf.tile(
-                            tf.expand_dims(tf.range(batch_size), axis=1), [1, num_splits])
-                        batch_ids = tf.boolean_mask(batch_ids_splitted, masks)
-                        labels_splitted = tf.reshape(
-                            seqs[:,1:], [batch_size, num_splits, 10])
-                        labels = tf.boolean_mask(labels_splitted, masks)
-                        inputs_splitted = tf.reshape(
-                            inputs, [batch_size, num_splits, 10, self.vocab_dim])
-                        inputs = tf.boolean_mask(inputs_splitted, masks)
-                        prev_inputs_splitted = tf.pad(inputs_splitted, [[0,0],[1,0],[0,0],[0,0]])[:,:-1]
-                        prev_inputs = tf.boolean_mask(prev_inputs_splitted, masks)
-                        prev_inputs = tf.pad(prev_inputs, [[0,0],[1,0],[0,0]])
-                        if decoder_type == "attn":
-                            dec_inputs = tf.TensorArray(tf.float32, 0,
-                                dynamic_size=True, clear_after_read=False, infer_shape=False)
-                            dec_inputs = dec_inputs.write(0, prev_inputs)
-                            initial_state = (dec_inputs, contexts, encode_masks)
-                            outputs, state = attn_decoder(inputs, initial_state)
-                        outputs = tf.reshape(outputs, [-1, size])
-                        logits = logit_fn(outputs)
-                        logits = tf.reshape(
-                            logits, [-1, 10, self.vocab_size])
-                        losses = tf.nn.sparse_softmax_cross_entropy_with_logits(
-                            labels=labels, logits=logits)
-                        losses = tf.reduce_sum(losses*weights, axis=1)
-                        loss_per_sample = tf.reshape(tf.segment_sum(losses, batch_ids), [batch_size])
+                        def to_slice():
+                            pad_num = tf.mod(10 - tf.mod(length, 10), 10)
+                            padded_seqs = tf.pad(seqs, [[0,0],[0,pad_num]])
+                            padded_idxs = tf.pad(idxs, [[0,0],[0,pad_num]], constant_values=-1)
+                            padded_weights = tf.pad(weights, [[0,0],[0,pad_num]])
+                            new_length = tf.shape(padded_idxs)[1]
+                            num_splits = tf.div(tf.to_int32(new_length), tf.to_int32(10))
+
+                            weights_splitted = tf.reshape(
+                                padded_weights, [batch_size, num_splits, 10])
+                            masks = tf.greater(
+                                tf.reduce_sum(weights_splitted, axis=2), 0)
+                            gathered_weights = tf.boolean_mask(weights_splitted, masks)
+                            idxs_splitted = tf.reshape(
+                                padded_idxs, [batch_size, num_splits, 10])
+                            idxs_starts = tf.maximum(idxs_splitted[:,:,0], 0)
+                            idxs_ends = tf.reduce_max(idxs_splitted, axis=2)
+                            idxs_lengths = idxs_ends - idxs_starts + 1
+                            contexts_splitted = model_utils.slice_fragments(
+                                contexts, idxs_starts, idxs_lengths)
+                            gathered_contexts = tf.boolean_mask(contexts_splitted, masks)
+                            max_word_seq_length = tf.shape(gathered_contexts)[1]
+                            idxs_splitted -= tf.maximum(idxs_splitted[:,:,0:1], 0)
+                            gathered_idxs = tf.boolean_mask(idxs_splitted, masks)
+                            encode_masks = tf.one_hot(
+                                gathered_idxs, max_word_seq_length, dtype=tf.int32)
+                            encode_masks = tf.cast(encode_masks, tf.bool)
+                            batch_ids_splitted = tf.tile(
+                                tf.expand_dims(tf.range(batch_size), axis=1), [1, num_splits])
+                            batch_ids = tf.boolean_mask(batch_ids_splitted, masks)
+                            labels_splitted = tf.reshape(
+                                padded_seqs[:,1:], [batch_size, num_splits, 10])
+                            gathered_labels = tf.boolean_mask(labels_splitted, masks)
+                            inputs = tf.nn.embedding_lookup(input_embedding, padded_seqs[:,:-1])
+                            inputs_splitted = tf.reshape(
+                                inputs, [batch_size, num_splits, 10, self.vocab_dim])
+                            gathered_inputs = tf.boolean_mask(inputs_splitted, masks)
+                            prev_inputs_splitted = tf.pad(
+                                inputs_splitted, [[0,0],[1,0],[0,0],[0,0]])[:,:-1]
+                            prev_inputs = tf.boolean_mask(prev_inputs_splitted, masks)
+                            prev_inputs = tf.pad(prev_inputs, [[0,0],[1,0],[0,0]])
+                            if decoder_type == "attn":
+                                dec_inputs = tf.TensorArray(tf.float32, 0,
+                                    dynamic_size=True, clear_after_read=False, infer_shape=False)
+                                dec_inputs = dec_inputs.write(0, prev_inputs)
+                                initial_state = (dec_inputs, gathered_contexts, encode_masks)
+                                outputs, state = attn_decoder(gathered_inputs, initial_state,
+                                    reuse=True)
+                            outputs = tf.reshape(outputs, [-1, size])
+                            logits = logit_fn(outputs)
+                            logits = tf.reshape(
+                                logits, [-1, 10, self.vocab_size])
+                            losses = tf.nn.sparse_softmax_cross_entropy_with_logits(
+                                labels=gathered_labels, logits=logits)
+                            losses = tf.reduce_sum(losses*gathered_weights, axis=1)
+                            loss_per_sample_b = tf.reshape(tf.segment_sum(losses, batch_ids), [batch_size])
+                            return loss_per_sample_b
+
+                        loss_per_sample = tf.cond(
+                            tf.less(length, 30),
+                            not_slice,
+                            to_slice)
+
                     return loss_per_sample, weights_per_sample
 
                 def make_lstm_cell(cudnn_lstm, contexts):
