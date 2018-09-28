@@ -469,8 +469,8 @@ class LM_Model(object):
                         labels=segs,
                         logits=seg_logits)
                     seg_loss_gold = tf.reduce_sum(seg_loss_gold*seg_weights) / tf.reduce_sum(seg_weights)
-                    segmented_seqs_gold = model_utils.slice_words(
-                        seqs, segs[:,1:-1])
+                    segmented_seqs_gold, segment_idxs_gold = model_utils.slice_words(
+                        seqs, segs[:,1:-1], get_idxs=True)
                     segmented_seqs_gold = tf.stop_gradient(segmented_seqs_gold)
                     max_char_length = tf.shape(segmented_seqs_gold)[2]
                     segmented_seqs_gold = tf.cond(
@@ -483,8 +483,8 @@ class LM_Model(object):
                     seg_loss_gold = 0.0
                     segmented_seqs_gold = None
                 seg_predicts = tf.concat(seg_predicts, axis=0)
-                segmented_seqs_hyp = model_utils.slice_words(
-                    tf.tile(seqs, [num_sample,1]), seg_predicts[:,1:-1])
+                segmented_seqs_hyp, segment_idxs_hyp = model_utils.slice_words(
+                    tf.tile(seqs, [num_sample,1]), seg_predicts[:,1:-1], get_idxs=True)
                 segmented_seqs_hyp = tf.stop_gradient(segmented_seqs_hyp)
                 max_char_length = tf.shape(segmented_seqs_hyp)[2]
                 segmented_seqs_hyp = tf.cond(
@@ -504,64 +504,78 @@ class LM_Model(object):
                     direction="unidirectional")
                 attn_decoder = model_utils.AttentionCell(
                     size,
-                    num_layer=2,
-                   # dropout=1.0-dropout,
+                    num_layer=self.num_layers,
+                    dropout=1.0-dropout,
                     is_training=self.training)
 
                 def logit_fn(outputs):
                     logits = tf.matmul(outputs, output_embedding, transpose_b=True)
                     return logits
 
-                def get_char_loss(contexts, segmented_seqs, reuse=None):
+                def get_char_loss(contexts, seqs, segment_idxs, reuse=None):
                     with tf.variable_scope("generator", reuse=reuse):
-                        batch_size = tf.shape(segmented_seqs)[0]
-                        max_word_seq_length = tf.shape(segmented_seqs)[1]
-                        max_char_seq_length = tf.shape(segmented_seqs)[2]+1
-                        masks = tf.greater(segmented_seqs, 0)
-                        weights = tf.pad(tf.to_float(masks), [[0,0],[0,0],[1,0]], constant_values=1.0)
-                        masks = tf.reduce_any(masks, axis=-1)
-                        weights *= tf.expand_dims(tf.to_float(masks), axis=-1)
-                        padded_segmented_seqs = tf.pad(segmented_seqs, [[0,0],[0,0],[1,1]])
-                        ids = tf.reshape(
-                            padded_segmented_seqs[:,:,:-1], [batch_size*max_word_seq_length, max_char_seq_length])
-                        inputs = tf.nn.embedding_lookup(input_embedding, ids)
-                        if decoder_type == "lstm":
-                            initial_state = model_utils.fully_connected(
-                                contexts,
-                                2*size,
-                                activation_fn=tf.tanh,
-                                dropout=1.0-dropout,
-                                is_training=self.training,
-                                scope="state_projs")
-                            contexts = model_utils.fully_connected(
-                                initial_state,
-                                self.vocab_dim,
-                                is_training=self.training,
-                                scope="context_projs")
-                            initial_state = tf.reshape(initial_state, [batch_size*max_word_seq_length, 2*size])
-                            initial_state = tuple(tf.split(tf.expand_dims(initial_state, axis=0), 2, axis=-1))
-                            contexts = tf.reshape(contexts, [batch_size*max_word_seq_length, 1, self.vocab_dim])
-                            contexts = tf.tile(contexts, [1, max_char_seq_length, 1])
-                            inputs = tf.concat([inputs, contexts], axis=-1)
-                            inputs = tf.transpose(inputs, [1,0,2])
-                            outputs, _ = lstm_decoder(inputs, initial_state=initial_state, training=trainable)
-                            outputs = tf.transpose(outputs, [1,0,2])
-                        elif decoder_type == "attn":
+                        batch_size = tf.shape(seqs)[0]
+                        max_word_seq_length = tf.shape(contexts)[1]
+                        weights = tf.pad(
+                            tf.to_float(tf.greater(seqs, 0)),
+                            [[0,0],[1,0]], constant_values=1.0)
+                        weights_per_sample = tf.reduce_sum(weights, axis=[1])
+                        seqs = tf.pad(seqs, [[0,0],[1,1]])
+                        idxs = tf.pad(segment_idxs, [[0,0],[0,1]], constant_values=-1)
+                        length = tf.shape(idxs)[1]
+
+                        pad_num = tf.mod(10 - tf.mod(length, 10), 10)
+                        seqs = tf.pad(seqs, [[0,0],[0,pad_num]])
+                        idxs = tf.pad(idxs, [[0,0],[0,pad_num]], constant_values=-1)
+                        weights = tf.pad(weights, [[0,0],[0,pad_num]])
+                        new_length = tf.shape(idxs)[1]
+                        inputs = tf.nn.embedding_lookup(input_embedding, seqs[:,:-1])
+                        num_splits = tf.div(tf.to_int32(new_length), tf.to_int32(10))
+
+                        weights_splitted = tf.reshape(
+                            weights, [batch_size, num_splits, 10])
+                        masks = tf.greater(
+                            tf.reduce_sum(weights_splitted, axis=2), 0)
+                        weights = tf.boolean_mask(weights_splitted, masks)
+                        idxs_splitted = tf.reshape(
+                            idxs, [batch_size, num_splits, 10])
+                        idxs_starts = tf.maximum(idxs_splitted[:,:,0], 0)
+                        idxs_ends = tf.reduce_max(idxs_splitted, axis=2)
+                        idxs_lengths = idxs_ends - idxs_starts + 1
+                        contexts_splitted = model_utils.slice_fragments(
+                            contexts, idxs_starts, idxs_lengths)
+                        contexts = tf.boolean_mask(contexts_splitted, masks)
+                        max_word_seq_length = tf.shape(contexts)[1]
+                        idxs_splitted -= tf.maximum(idxs_splitted[:,:,0:1], 0)
+                        idxs = tf.boolean_mask(idxs_splitted, masks)
+                        encode_masks = tf.one_hot(idxs, max_word_seq_length, dtype=tf.int32)
+                        encode_masks = tf.cast(encode_masks, tf.bool)
+                        batch_ids_splitted = tf.tile(
+                            tf.expand_dims(tf.range(batch_size), axis=1), [1, num_splits])
+                        batch_ids = tf.boolean_mask(batch_ids_splitted, masks)
+                        labels_splitted = tf.reshape(
+                            seqs[:,1:], [batch_size, num_splits, 10])
+                        labels = tf.boolean_mask(labels_splitted, masks)
+                        inputs_splitted = tf.reshape(
+                            inputs, [batch_size, num_splits, 10, self.vocab_dim])
+                        inputs = tf.boolean_mask(inputs_splitted, masks)
+                        prev_inputs_splitted = tf.pad(inputs_splitted, [[0,0],[1,0],[0,0],[0,0]])[:,:-1]
+                        prev_inputs = tf.boolean_mask(prev_inputs_splitted, masks)
+                        prev_inputs = tf.pad(prev_inputs, [[0,0],[1,0],[0,0]])
+                        if decoder_type == "attn":
                             dec_inputs = tf.TensorArray(tf.float32, 0,
                                 dynamic_size=True, clear_after_read=False, infer_shape=False)
-                            encodes = tf.reshape(contexts, [batch_size*max_word_seq_length, 1, 2*self.vocab_dim])
-                            masks = tf.ones([batch_size*max_word_seq_length, 1], dtype=tf.bool)
-                            initial_state = (dec_inputs, encodes, masks)
+                            dec_inputs = dec_inputs.write(0, prev_inputs)
+                            initial_state = (dec_inputs, contexts, encode_masks)
                             outputs, state = attn_decoder(inputs, initial_state)
-                        outputs = tf.reshape(outputs, [batch_size*max_word_seq_length*max_char_seq_length, size])
+                        outputs = tf.reshape(outputs, [-1, size])
                         logits = logit_fn(outputs)
                         logits = tf.reshape(
-                            logits, [batch_size, max_word_seq_length, max_char_seq_length, self.vocab_size])
+                            logits, [-1, 10, self.vocab_size])
                         losses = tf.nn.sparse_softmax_cross_entropy_with_logits(
-                            labels=padded_segmented_seqs[:,:,1:], logits=logits)
-                        losses *= weights
-                        loss_per_sample = tf.reduce_sum(losses, axis=[1,2])
-                        weights_per_sample = tf.reduce_sum(weights, axis=[1,2])
+                            labels=labels, logits=logits)
+                        losses = tf.reduce_sum(losses*weights, axis=1)
+                        loss_per_sample = tf.reshape(tf.segment_sum(losses, batch_ids), [batch_size])
                     return loss_per_sample, weights_per_sample
 
                 def make_lstm_cell(cudnn_lstm, contexts):
@@ -581,24 +595,7 @@ class LM_Model(object):
                     with tf.variable_scope("generator", reuse=reuse):
                         batch_size = tf.shape(contexts)[0]
                         max_word_seq_length = tf.shape(contexts)[1]
-                        if decoder_type == "lstm":
-                            initial_state = model_utils.fully_connected(
-                                contexts,
-                                2*size,
-                                activation_fn=tf.tanh,
-                                dropout=1.0-dropout,
-                                is_training=self.training,
-                                scope="state_projs")
-                            contexts = model_utils.fully_connected(
-                                initial_state,
-                                self.vocab_dim,
-                                is_training=self.training,
-                                scope="context_projs")
-                            contexts = tf.reshape(contexts, [batch_size*max_word_seq_length, self.vocab_dim])
-                            decoder_cell = make_lstm_cell(lstm_decoder, contexts)
-                            initial_state = tf.reshape(initial_state, [batch_size*max_word_seq_length, 2*size])
-                            initial_state = tuple(tf.split(initial_state, 2, axis=-1))
-                        elif decoder_type == "attn":
+                        if decoder_type == "attn":
                             dec_inputs = tf.TensorArray(tf.float32, 0,
                                 dynamic_size=True, clear_after_read=False, infer_shape=False)
                             encodes = tf.reshape(contexts, [batch_size*max_word_seq_length, 1, 2*self.vocab_dim])
@@ -704,7 +701,7 @@ class LM_Model(object):
                 if loss_type == 'unsup' or segmented_seqs_gold == None:                        
                     word_embeds_hyp, contexts_hyp, word_encodes_hyp = encode_words(
                         segmented_seqs_hyp)
-                    lm_char_loss_per_sample_hyp, lm_char_weights_per_sample_hyp = get_char_loss(contexts_hyp, segmented_seqs_hyp)
+                    lm_char_loss_per_sample_hyp, lm_char_weights_per_sample_hyp = get_char_loss(contexts_hyp, tf.tile(seqs, [num_sample,1]), segment_idxs_hyp)
                     lm_char_loss_per_sample_hyp = tf.stack(tf.split(lm_char_loss_per_sample_hyp, num_sample, axis=0), axis=1)
                     lm_char_weights_per_sample_hyp = tf.stack(
                         tf.split(lm_char_weights_per_sample_hyp, num_sample, axis=0), axis=1)
@@ -745,7 +742,7 @@ class LM_Model(object):
                     word_embeds_gold, contexts_gold, word_encodes_gold = encode_words(
                         segmented_seqs_gold)
                     lm_char_loss_per_sample_gold, lm_char_weights_per_sample_gold = get_char_loss(
-                        contexts_gold, segmented_seqs_gold)
+                        contexts_gold, seqs, segment_idxs_gold)
                     lm_char_loss_gold = tf.reduce_sum(lm_char_loss_per_sample_gold) / \
                         tf.reduce_sum(lm_char_weights_per_sample_gold)
                    # lm_word_loss_gold = get_word_loss(contexts_gold, segmented_seqs_gold)
