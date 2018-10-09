@@ -57,6 +57,8 @@ tf.app.flags.DEFINE_integer("vocab_dim", 100, "Size of embedding.")
 tf.app.flags.DEFINE_string("block_type", "transformer2", "Block type: lstm|transformer")
 tf.app.flags.DEFINE_string("decoder_type", "attn", "Decoder type: lstm|attn")
 tf.app.flags.DEFINE_string("loss_type", "unsup", "Loss type: sup|unsup")
+tf.app.flags.DEFINE_string("model", "ultra_lm", "Model: simple_lm|ultra_lm")
+tf.app.flags.DEFINE_boolean("early_stop", True, "Set True to turn on early stop.")
 tf.app.flags.DEFINE_string("data_dir", "./text_corpus", "Data directory")
 tf.app.flags.DEFINE_string("train_dir", "./model", "Training directory.")
 tf.app.flags.DEFINE_string("embedding_files", "./embeddings/char_100.txt", "Pretrained embedding files.")
@@ -103,6 +105,7 @@ def create_train_graph(session, vocab, posseg_vocab):
         block_type=FLAGS.block_type,
         decoder_type=FLAGS.decoder_type,
         loss_type=FLAGS.loss_type,
+        model=FLAGS.model,
         embedding_init=vocab.embedding_init,
         dropout=FLAGS.dropout,
         learning_rate=FLAGS.learning_rate, clr_period=FLAGS.clr_period)
@@ -122,7 +125,8 @@ def create_infer_graph(session, vocab, posseg_vocab):
         FLAGS.size, FLAGS.num_layers,
         block_type=FLAGS.block_type,
         decoder_type=FLAGS.decoder_type,
-        loss_type=FLAGS.loss_type)
+        loss_type=FLAGS.loss_type,
+        model=FLAGS.model)
     model.init(session, FLAGS.train_dir)
 
     return seqs_placeholder, model
@@ -151,8 +155,7 @@ def train():
         step_time, loss = 0.0, 0.0
         current_step = 0
         previous_losses = []
-        eval_loss = 999999999999.0
-        step_loss = 0.0
+        eval_loss_best = sys.float_info.max
         while True:
             start_time = time.time()
             input_feed = {dataset.handle: dataset.handles['train']}
@@ -182,8 +185,17 @@ def train():
                 previous_losses.append(eval_loss)
                 sys.stdout.flush()
                 # Save checkpoint and zero timer and loss.
-                checkpoint_path = os.path.join(FLAGS.train_dir, "lm.ckpt")
-                model.saver.save(sess, checkpoint_path, global_step=model.global_step)
+                threshold = 10
+                if len(previous_losses) > threshold and \
+                    eval_loss > max(previous_losses[-threshold-1:-1]) and \
+                    eval_loss_best < min(previous_losses[-threshold:]) and \
+                    FLAGS.early_stop:
+                    break
+                # Save checkpoint and zero timer and loss.
+                if eval_loss < eval_loss_best or (not FLAGS.early_stop):
+                    checkpoint_path = os.path.join(FLAGS.train_dir, "lm.ckpt")
+                    model.saver.save(sess, checkpoint_path, global_step=model.global_step)
+                    eval_loss_best = eval_loss
                 step_time, loss = 0.0, 0.0
             if model.global_step.eval() >= FLAGS.steps_limit:
                 break
