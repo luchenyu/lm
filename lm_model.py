@@ -200,13 +200,20 @@ class LM_Model(object):
 
 
             """ lm components """
-            def segment(seqs, num_sample=2, reuse=None):
+            def segment(seqs, num_sample=2, segs=None, reuse=None):
                 """
                 segment seqs
                 """
                 with tf.variable_scope("seg", reuse=reuse):
 
-                    lstm = tf.contrib.cudnn_rnn.CudnnLSTM(
+                    batch_size = tf.shape(seqs)[0]
+                    length = tf.shape(seqs)[1]
+
+                    uni_lstm = tf.contrib.cudnn_rnn.CudnnLSTM(
+                        num_layers=1,
+                        num_units=self.size,
+                        direction="unidirectional")
+                    bi_lstm = tf.contrib.cudnn_rnn.CudnnLSTM(
                         num_layers=1,
                         num_units=self.size,
                         direction="bidirectional")
@@ -216,29 +223,77 @@ class LM_Model(object):
                     seg_masks_and = tf.logical_or(masks[:,:-1], masks[:,1:])
                     seg_masks_or = tf.logical_xor(masks[:,:-1], masks[:,1:])
                     seg_weights = tf.to_float(tf.logical_and(masks[:,:-1], masks[:,1:]))
-                    inputs = tf.nn.embedding_lookup(self.input_embedding, padded_seqs)
-                    inputs = tf.transpose(inputs, [1, 0, 2])
-                    outputs, states = lstm(inputs, training=trainable)
-                    padded_char_encodes = tf.transpose(outputs, [1, 0, 2])
-                    padded_char_encodes *= tf.expand_dims(tf.to_float(masks), axis=-1)
-                    char_encodes = padded_char_encodes[:,1:-1]
-                    adjacent_encodes = tf.concat([padded_char_encodes[:,:-1], padded_char_encodes[:,1:]], axis=-1)
-                    seg_logits = model_utils.MLP(
-                        adjacent_encodes,
-                        2,
-                        self.size,
-                        1,
-                        dropout=1.0-self.dropout,
-                        is_training=self.training,
-                        scope="seg_logits")
-                    seg_logits = tf.squeeze(seg_logits, -1)
-                    seg_probs = tf.sigmoid(seg_logits)
-                    seg_predicts = []
+                    inputs = tf.nn.embedding_lookup(self.input_embedding, seqs)
+
+                    with tf.variable_scope("base"):
+                        outputs, state = bi_lstm(tf.transpose(inputs, [1,0,2]), training=trainable)
+                        outputs = tf.transpose(outputs, [1,0,2])
+                        adjacent_encodes = tf.concat([outputs[:,:-1], outputs[:,1:]], axis=-1)
+                        seg_logits_base = model_utils.MLP(
+                            adjacent_encodes,
+                            2,
+                            self.size,
+                            1,
+                            dropout=1.0-self.dropout,
+                            is_training=self.training,
+                            scope="seg_logits")
+                        seg_logits_base = tf.pad(tf.squeeze(seg_logits_base, -1), [[0,0],[1,1]])
+
+                    def body(seg_logits, seg_predicts, seg_predicts_prev, i):
+                        seg_predicts_prev = seg_predicts
+                        seg_feats = tf.expand_dims(seg_predicts, axis=2)
+                        fw_feats = tf.concat([inputs, seg_feats[:,:-1]], axis=2)
+                        bw_feats = tf.concat([inputs, seg_feats[:,1:]], axis=2)
+                        with tf.variable_scope("fw"):
+                            fw_feats = tf.transpose(fw_feats, [1, 0, 2])
+                            fw_outputs, state = uni_lstm(fw_feats, training=trainable)
+                            fw_outputs = tf.transpose(fw_outputs, [1, 0, 2])
+                        with tf.variable_scope("bw"):
+                            bw_feats = tf.reverse(tf.transpose(bw_feats, [1, 0, 2]), axis=[0])
+                            bw_outputs, state = uni_lstm(bw_feats, training=trainable)
+                            bw_outputs = tf.reverse(tf.transpose(bw_outputs, [1, 0, 2]), axis=[1])
+                        adjacent_encodes = tf.concat([fw_outputs[:,:-1], bw_outputs[:,1:]], axis=-1)
+                        seg_logits = model_utils.MLP(
+                            adjacent_encodes,
+                            2,
+                            self.size,
+                            1,
+                            dropout=1.0-self.dropout,
+                            is_training=self.training,
+                            scope="seg_logits")
+                        seg_logits = tf.pad(tf.squeeze(seg_logits, -1), [[0,0],[1,1]])
+                        seg_logits += seg_logits_base
+                        seg_probs = tf.sigmoid(seg_logits)
+                        seg_predicts = tf.greater(seg_probs, tf.random_uniform(tf.shape(seg_probs)))
+                        seg_predicts = tf.logical_or(tf.logical_and(seg_predicts, seg_masks_and), seg_masks_or)
+                        seg_predicts = tf.to_float(seg_predicts)
+                        i += 1
+                        return seg_logits, seg_predicts, seg_predicts_prev, i
+
+                    seg_predicts_list = []
+                    if segs != None:
+                        seg_logits, seg_predicts, _, _ = body(None, segs, segs, 0)
+                        seg_predicts_list.append(seg_predicts)
+                        tf.get_variable_scope().reuse_variables()
+                    else:
+                        seg_logits = tf.zeros([batch_size, length+1])
+
+                    seg_predicts = tf.greater(tf.sigmoid(seg_logits_base), tf.random_uniform(tf.shape(seg_logits_base)))
+                    seg_predicts = tf.logical_or(tf.logical_and(seg_predicts, seg_masks_and), seg_masks_or)
+                    seg_predicts = tf.to_float(seg_predicts)
+                    seg_predicts_prev = tf.zeros([batch_size, length+1])
+                    i = 0
                     for _ in range(num_sample):
-                        seg = tf.greater(seg_probs, tf.random_uniform(tf.shape(seg_probs)))
-                        seg = tf.logical_or(tf.logical_and(seg, seg_masks_and), seg_masks_or)
-                        seg_predicts.append(tf.to_float(seg))
-                return seg_logits, seg_weights, seg_predicts
+                        for _ in range(10):
+                            _, seg_predicts, seg_predicts_prev, i = body(
+                                None, seg_predicts, seg_predicts_prev, i)
+                            seg_predicts = tf.where(
+                                tf.greater(tf.random_uniform(tf.shape(seg_predicts)), 0.9/float(i)),
+                                seg_predicts,
+                                seg_predicts_prev)
+                            tf.get_variable_scope().reuse_variables()
+                        seg_predicts_list.append(seg_predicts)
+                    return seg_logits, seg_logits_base, seg_weights, seg_predicts_list
 
             def embed_words(segmented_seqs, reuse=None):
                 """
@@ -373,7 +428,7 @@ class LM_Model(object):
                         contexts = contexts_fw + contexts_bw
                         word_encodes = tf.stack(word_encodes, axis=2)
                 elif block_type == "transformer2":
-                    word_encodes = []
+                    contexts = []
                     attn_masks = tf.tile(tf.expand_dims(masks, 1), [1,max_length,1])
                     attn_masks = tf.logical_and(attn_masks, tf.expand_dims(masks, -1))
                     attn_masks = tf.logical_and(attn_masks,
@@ -391,10 +446,27 @@ class LM_Model(object):
                                     is_training=self.training,
                                     scope="transformer")
                                 inputs *= tf.expand_dims(tf.to_float(masks), axis=-1)
-                            word_encodes.append(tf.concat([word_embeds, inputs], axis=-1))
-                        contexts = inputs
-                        word_encodes = tf.stack(word_encodes, axis=2)
+                            contexts.append(inputs)
+                        contexts = tf.concat(contexts, axis=-1)
+                        word_encodes = tf.concat([word_embeds, contexts], axis=-1)
                 return word_embeds, contexts, word_encodes
+
+            def discriminate(word_embeds, contexts, reuse=None):
+                """
+                outputs the degree of matchness of the word embeds and contexts
+                """
+
+                with tf.variable_scope("discriminator", reuse=reuse):
+                    inputs = tf.concat([word_embeds, contexts], axis=-1)
+                    outputs = model_utils.MLP(
+                        inputs,
+                        3,
+                        2*size,
+                        1,
+                        is_training=self.training,
+                        scope="mlp")
+                    outputs = tf.squeeze(outputs, axis=-1)
+                return outputs
 
             """ lm model """
             def ultra_lm(seqs, segs, pos_labels):
@@ -457,12 +529,15 @@ class LM_Model(object):
                    # corrupt_inputs = tf.nn.embedding_lookup(input_embedding, corrupt_seqs)
 
 
-                num_sample = 2
-                seg_logits, seg_weights, seg_predicts = segment(seqs, num_sample=num_sample)
+                num_sample = 1
+                seg_logits, seg_logits_base, seg_weights, seg_predicts = segment(seqs, num_sample=num_sample, segs=segs)
                 if segs != None:
                     seg_loss_gold = tf.nn.sigmoid_cross_entropy_with_logits(
                         labels=segs,
                         logits=seg_logits)
+                    seg_loss_gold += tf.nn.sigmoid_cross_entropy_with_logits(
+                        labels=segs,
+                        logits=seg_logits_base)
                     seg_loss_gold = tf.reduce_sum(seg_loss_gold*seg_weights) / tf.reduce_sum(seg_weights)
                     segmented_seqs_gold, segment_idxs_gold = model_utils.slice_words(
                         seqs, segs[:,1:-1], get_idxs=True)
@@ -472,8 +547,8 @@ class LM_Model(object):
                         tf.less(max_char_length, 10),
                         lambda: segmented_seqs_gold,
                         lambda: segmented_seqs_gold[:,:,:10])
-                    seg_predicts.append(segs)
-                    num_sample += 1
+                   # seg_predicts.append(segs)
+                   # num_sample += 1
                 else:
                     seg_loss_gold = 0.0
                     segmented_seqs_gold = None
@@ -659,40 +734,6 @@ class LM_Model(object):
                             sample_scores, [batch_size, max_word_seq_length, num_candidates])
                     return sample_seqs, sample_scores
 
-                def get_word_loss(contexts, segmented_seqs):
-                    batch_size = tf.shape(contexts)[0]
-                    max_word_length = tf.shape(contexts)[1]
-                    max_char_length = tf.shape(segmented_seqs)[2]
-                    masks = tf.reduce_any(tf.greater(segmented_seqs, 0), axis=-1)
-                    sample_seqs, _ = decode(contexts, max_char_length, 10, reuse=True)
-                    logit_masks = tf.equal(tf.expand_dims(segmented_seqs, 2), sample_seqs)
-                    logit_masks = tf.reduce_all(logit_masks, axis=-1)
-                    logit_masks = tf.pad(logit_masks, [[0,0],[0,0],[1,0]])
-                    sample_seqs = tf.concat(
-                        [tf.expand_dims(segmented_seqs, 2), sample_seqs], axis=2)
-                    sample_seqs = tf.reshape(sample_seqs, [batch_size, max_word_length*11, max_char_length])
-                    sample_embeds = embed_words(sample_seqs, reuse=True)
-                    with tf.variable_scope("matcher"):
-                        contexts = model_utils.fully_connected(
-                            contexts,
-                            size,
-                            is_training=self.training,
-                            scope="context_projs")
-                        sample_embeds = model_utils.fully_connected(
-                            sample_embeds,
-                            size,
-                            is_training=self.training,
-                            scope="embed_projs")
-                        sample_embeds = tf.reshape(sample_embeds, [batch_size, max_word_length, 11, size])
-                        logits = tf.matmul(sample_embeds, tf.expand_dims(contexts, axis=-1))
-                        logits = tf.squeeze(logits, axis=-1)
-                        logits -= 1e6 * tf.to_float(logit_masks)
-                        losses = tf.nn.sparse_softmax_cross_entropy_with_logits(
-                            labels=tf.zeros([batch_size, max_word_length], dtype=tf.int32), logits=logits)
-                        weights = tf.to_float(masks)
-                        loss = tf.reduce_sum(losses*weights) / tf.reduce_sum(weights)
-                    return loss
-
                 def sample(segmented_seqs):
                     batch_size = tf.shape(segmented_seqs)[0]
                     for i in range(1):
@@ -743,53 +784,90 @@ class LM_Model(object):
                     return pos_logits
 
                 if loss_type == 'unsup' or segmented_seqs_gold == None:                        
+                    max_word_length = tf.shape(segmented_seqs_hyp)[1]
+                    max_char_length = tf.shape(segmented_seqs_hyp)[2]
+
                     word_embeds_hyp, contexts_hyp, word_encodes_hyp = encode_words(
                         segmented_seqs_hyp)
-                    lm_char_loss_per_sample_hyp, lm_char_weights_per_sample_hyp = get_char_loss(contexts_hyp, tf.tile(seqs, [num_sample,1]), segment_idxs_hyp)
-                    lm_char_loss_per_sample_hyp = tf.stack(tf.split(lm_char_loss_per_sample_hyp, num_sample, axis=0), axis=1)
-                    lm_char_weights_per_sample_hyp = tf.stack(
-                        tf.split(lm_char_weights_per_sample_hyp, num_sample, axis=0), axis=1)
-                    idx = tf.argmin(lm_char_loss_per_sample_hyp, axis=-1, output_type=tf.int32)
+                    masks = tf.reduce_any(tf.greater(segmented_seqs_hyp, 0), axis=-1)
+                    positive_logits = discriminate(word_embeds_hyp, contexts_hyp)
+                    positive_probs_mean = tf.reduce_sum(
+                        tf.log_sigmoid(positive_logits)*tf.to_float(masks), axis=1) / \
+                        tf.reduce_sum(tf.to_float(masks), axis=1)
+                    positive_probs_mean = tf.stack(tf.split(positive_probs_mean, num_sample, axis=0), axis=1)
+                    idx = tf.argmax(positive_probs_mean, axis=-1, output_type=tf.int32)
                     idx = tf.stack([tf.range(batch_size), idx], axis=1)
+
                     seg_loss_hyp = tf.reduce_sum(tf.reshape(tf.gather_nd(seg_loss_hyp, idx), [batch_size])) / \
                         tf.reduce_sum(seg_weights)
-                    lm_char_loss_hyp = tf.reduce_sum(
-                        tf.reshape(tf.gather_nd(lm_char_loss_per_sample_hyp, idx), [batch_size]))
-                    lm_char_loss_hyp /= tf.reduce_sum(
-                        tf.reshape(tf.gather_nd(lm_char_weights_per_sample_hyp, idx), [batch_size]))
                     segmented_seqs_hyp = tf.stack(tf.split(segmented_seqs_hyp, num_sample, axis=0), axis=1)
-                    max_word_length = tf.shape(segmented_seqs_hyp)[2]
-                    max_char_length = tf.shape(segmented_seqs_hyp)[3]
                     segmented_seqs_hyp = tf.reshape(
                         tf.gather_nd(segmented_seqs_hyp, idx), [batch_size, max_word_length, max_char_length])
+                    segment_idxs_hyp = tf.stack(tf.split(segment_idxs_hyp, num_sample, axis=0), axis=1)
+                    segment_idxs_hyp = tf.reshape(
+                        tf.gather_nd(segment_idxs_hyp, idx), [batch_size, -1])
+                    word_embeds_hyp = tf.stack(tf.split(word_embeds_hyp, num_sample, axis=0), axis=1)
+                    word_embeds_hyp = tf.reshape(
+                        tf.gather_nd(word_embeds_hyp, idx), [batch_size, max_word_length, 2*self.vocab_dim])
                     contexts_hyp = tf.stack(tf.split(contexts_hyp, num_sample, axis=0), axis=1)
                     contexts_hyp = tf.reshape(
-                        tf.gather_nd(contexts_hyp, idx), [batch_size, max_word_length, 2*self.vocab_dim])
+                        tf.gather_nd(contexts_hyp, idx),
+                        [batch_size, max_word_length, self.num_layers*2*self.vocab_dim])
                     word_encodes_hyp = tf.stack(tf.split(word_encodes_hyp, num_sample, axis=0), axis=1)
                     word_encodes_hyp = tf.reshape(
                         tf.gather_nd(word_encodes_hyp, idx),
-                        [batch_size, max_word_length, self.num_layers, 4*self.vocab_dim])
-                    segmented_seq_masks_hyp = tf.reduce_any(tf.greater(segmented_seqs_hyp, 0), axis=-1)
-                    segmented_seq_lengths_hyp = tf.reduce_sum(tf.to_int32(segmented_seq_masks_hyp), axis=-1)
+                        [batch_size, max_word_length, (self.num_layers+1)*2*self.vocab_dim])
+                    
+                    masks = tf.reduce_any(tf.greater(segmented_seqs_hyp, 0), axis=-1)
+                    valid_word_embeds_hyp = tf.boolean_mask(word_embeds_hyp, masks)
+                    valid_contexts_hyp = tf.boolean_mask(contexts_hyp, masks)
+                    positive_logits = tf.stack(tf.split(positive_logits, num_sample, axis=0), axis=1)
+                    positive_logits = tf.reshape(
+                        tf.gather_nd(positive_logits, idx), [batch_size, max_word_length])
+                    positive_logits = tf.boolean_mask(positive_logits, masks)
+                    idxs = tf.random_shuffle(tf.range(tf.shape(valid_word_embeds_hyp)[0]))
+                    negative_logits = discriminate(
+                        tf.gather(valid_word_embeds_hyp, idxs), valid_contexts_hyp, reuse=True)
+                    positive_loss = tf.nn.sigmoid_cross_entropy_with_logits(
+                        labels=tf.ones(tf.shape(positive_logits)), logits=positive_logits)
+                    negative_loss = tf.nn.sigmoid_cross_entropy_with_logits(
+                        labels=tf.zeros(tf.shape(negative_logits)), logits=negative_logits)
+                    discriminator_loss_hyp = tf.reduce_mean(positive_loss) + tf.reduce_mean(negative_loss)
+
+                    lm_char_loss_per_sample_hyp, lm_char_weights_per_sample_hyp = get_char_loss(
+                        contexts_hyp, seqs, segment_idxs_hyp)
+                    lm_char_loss_hyp = tf.reduce_sum(lm_char_loss_per_sample_hyp) / \
+                        tf.reduce_sum(lm_char_weights_per_sample_hyp)
+                    segmented_seq_lengths_hyp = tf.reduce_sum(tf.to_int32(masks), axis=-1)
                    # pos_logits_hyp = get_pos_logits(word_encodes_hyp)
                    # viterbi_tags, viterbi_scores = tf.contrib.crf.crf_decode(
                    #     pos_logits_hyp, transition_params, segmented_seq_lengths_hyp)
-                   # lm_word_loss_hyp = get_word_loss(contexts_hyp, segmented_seqs_hyp)
 
                    # tf.get_variable_scope().reuse_variables()
                    # sample_seqs = sample(segmented_seqs_hyp)
 
-                    loss = seg_loss_hyp+lm_char_loss_hyp
+                    loss = seg_loss_hyp+discriminator_loss_hyp
                     return loss, word_encodes_hyp, segmented_seqs_hyp, seg_predicts, None, seqs
 
                 else:
                     word_embeds_gold, contexts_gold, word_encodes_gold = encode_words(
                         segmented_seqs_gold)
+                    masks = tf.reduce_any(tf.greater(segmented_seqs_gold, 0), axis=-1)
+                    valid_word_embeds_gold = tf.boolean_mask(word_embeds_gold, masks)
+                    valid_contexts_gold = tf.boolean_mask(contexts_gold, masks)
+                    positive_logits = discriminate(valid_word_embeds_gold, valid_contexts_gold)
+                    idxs = tf.random_shuffle(tf.range(tf.shape(valid_word_embeds_gold)[0]))
+                    negative_logits = discriminate(
+                        tf.gather(valid_word_embeds_gold, idxs), valid_contexts_gold, reuse=True)
+                    positive_loss = tf.nn.sigmoid_cross_entropy_with_logits(
+                        labels=tf.ones(tf.shape(positive_logits)), logits=positive_logits)
+                    negative_loss = tf.nn.sigmoid_cross_entropy_with_logits(
+                        labels=tf.zeros(tf.shape(negative_logits)), logits=negative_logits)
+                    discriminator_loss_gold = tf.reduce_mean(positive_loss) + tf.reduce_mean(negative_loss)
                     lm_char_loss_per_sample_gold, lm_char_weights_per_sample_gold = get_char_loss(
                         contexts_gold, seqs, segment_idxs_gold)
                     lm_char_loss_gold = tf.reduce_sum(lm_char_loss_per_sample_gold) / \
                         tf.reduce_sum(lm_char_weights_per_sample_gold)
-                   # lm_word_loss_gold = get_word_loss(contexts_gold, segmented_seqs_gold)
                    # if pos_labels != None:
                    #     segmented_seq_masks_gold = tf.reduce_any(tf.greater(segmented_seqs_gold, 0), axis=-1)
                    #     segmented_seq_lengths_gold = tf.reduce_sum(tf.to_int32(segmented_seq_masks_gold), axis=-1)
@@ -799,7 +877,7 @@ class LM_Model(object):
                    #         transition_params=transition_params)
                    #     pos_loss = tf.reduce_mean(-log_probs)
 
-                    loss = seg_loss_gold+lm_char_loss_gold
+                    loss = seg_loss_gold+discriminator_loss_gold
                     return loss, word_encodes_gold, segmented_seqs_gold, segs, pos_labels, seqs
 
 
