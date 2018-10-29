@@ -733,11 +733,9 @@ class LM_Model(object):
                     idxs = tf.random_shuffle(tf.range(tf.shape(valid_word_embeds_gold)[0]))
                     negative_logits = discriminate(
                         tf.gather(valid_word_embeds_gold, idxs), valid_contexts_gold, reuse=True)
-                    positive_loss = tf.nn.sigmoid_cross_entropy_with_logits(
-                        labels=tf.ones(tf.shape(positive_logits)), logits=positive_logits)
-                    negative_loss = tf.nn.sigmoid_cross_entropy_with_logits(
-                        labels=tf.zeros(tf.shape(negative_logits)), logits=negative_logits)
-                    discriminator_loss_gold = tf.reduce_mean(positive_loss) + tf.reduce_mean(negative_loss)
+                    discriminator_loss_gold = tf.nn.sigmoid_cross_entropy_with_logits(
+                        labels=tf.ones(tf.shape(positive_logits)), logits=positive_logits-negative_logits)
+                    discriminator_loss_gold = tf.reduce_mean(discriminator_loss_gold)
                    # if pos_labels != None:
                    #     segmented_seq_masks_gold = tf.reduce_any(tf.greater(segmented_seqs_gold, 0), axis=-1)
                    #     segmented_seq_lengths_gold = tf.reduce_sum(tf.to_int32(segmented_seq_masks_gold), axis=-1)
@@ -747,7 +745,7 @@ class LM_Model(object):
                    #         transition_params=transition_params)
                    #     pos_loss = tf.reduce_mean(-log_probs)
 
-                    loss = seg_loss_gold+discriminator_loss_gold
+                    loss = discriminator_loss_gold
                     return loss, word_embeds_gold, segmented_seqs_gold, segs, word_masks_gold, seqs
 
 
@@ -765,6 +763,17 @@ class LM_Model(object):
                     self.scope.trainable_variables(),
                     self.scope.name)
 
+            total_params = 0
+            for var in tf.trainable_variables():
+                try:
+                    local_params=1
+                    shape = var.get_shape()  #getting shape of a variable
+                    for i in shape:
+                        local_params *= i.value  #mutiplying dimension values
+                    total_params += local_params
+                except:
+                    print(var)
+            print("total number of parameters is: {}".format(total_params))
             self.saver = tf.train.Saver(self.scope.global_variables())
 
         def wrapper(func):
