@@ -19,7 +19,7 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-import math, os, random
+import json, math, os, random
 
 import numpy as np
 from six.moves import xrange  # pylint: disable=redefined-builtin
@@ -41,20 +41,39 @@ class LM_Dataset(object):
                  vocab,
                  posseg_vocab,
                  batch_size,
-                 data_paths):
+                 data_paths,
+                 segmented=False):
         """Create the dataset.
 
         Args:
             data_dir: path to the data files
         """
 
-        self.cutter = data_utils.Cutter()
+        self.cutter = data_utils.Cutter('jieba')
         def __sentence_to_token_ids(text):
             text = text.strip()
             text = data_utils.normalize(text)
-            pos_segs = self.cutter.cut_words(text)
-            seqs, segs, pos_labels = data_utils.posseg_to_token_ids(pos_segs, vocab, posseg_vocab)
-            return np.array(seqs,dtype=np.int32),np.array(segs,dtype=np.float32),np.array(pos_labels,dtype=np.int32)
+            words = self.cutter.cut_words(text)
+            seq, seg = data_utils.words_to_token_ids(words, vocab)
+            seq = np.array(seq, dtype=np.int32)
+            seg = np.array(seg, dtype=np.float32)
+            return seq, seg
+        def __words_to_token_ids(text):
+            text = text.strip()
+            words = json.loads(text, encoding='utf-8')
+            seq = []
+            seg = []
+            for word in words:
+                word_ids = vocab.sentence_to_token_ids(data_utils.normalize(word))
+                if len(word_ids) == 0:
+                    continue
+                seq.extend(word_ids)
+                seg.extend([1.0]+[0.0]*(len(word_ids)-1))
+            if len(seg) > 0:
+                seg.append(1.0)
+            seq = np.array(seq, dtype=np.int32)
+            seg = np.array(seg, dtype=np.float32)
+            return seq, seg
 
         self.iterators = {}
         for key in data_paths:
@@ -65,15 +84,20 @@ class LM_Dataset(object):
             else:
                 filenames = [data_path]
             dataset = tf.data.TextLineDataset(filenames)
-            dataset = dataset.map(
-                lambda text: tf.py_func(__sentence_to_token_ids, [text], [tf.int32, tf.float32, tf.int32]),
-                num_parallel_calls=64)
+            if segmented:
+                dataset = dataset.map(
+                    lambda text: tf.py_func(__words_to_token_ids, [text], [tf.int32, tf.float32]),
+                    num_parallel_calls=64)
+            else:
+                dataset = dataset.map(
+                    lambda text: tf.py_func(__sentence_to_token_ids, [text], [tf.int32, tf.float32]),
+                    num_parallel_calls=64)
             dataset = dataset.prefetch(buffer_size=10000)
             if mode == "repeat":
-                dataset = dataset.filter(lambda seqs, segs, pos_labels: tf.less(tf.shape(seqs)[0], 100))
+                dataset = dataset.filter(lambda seqs, segs: tf.less(tf.shape(seqs)[0], 300))
                 dataset = dataset.repeat()
                 dataset = dataset.shuffle(buffer_size=50000)
-            dataset = dataset.padded_batch(batch_size, padded_shapes=([None], [None], [None]))
+            dataset = dataset.padded_batch(batch_size, padded_shapes=([None], [None]))
             dataset = dataset.prefetch(buffer_size=100)
             iterator = dataset.make_initializable_iterator()
             self.iterators[key] = iterator

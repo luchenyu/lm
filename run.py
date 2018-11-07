@@ -53,15 +53,16 @@ tf.app.flags.DEFINE_float("dropout", 0.1, "Dropout rate.")
 tf.app.flags.DEFINE_integer("size", 256, "Size of each model layer.")
 tf.app.flags.DEFINE_integer("num_layers", 3, "Number of layers in the model.")
 tf.app.flags.DEFINE_integer("vocab_size", 10000, "vocabulary size.")
-tf.app.flags.DEFINE_integer("vocab_dim", 100, "Size of embedding.")
+tf.app.flags.DEFINE_integer("vocab_dim", 300, "Size of embedding.")
 tf.app.flags.DEFINE_string("block_type", "transformer2", "Block type: lstm|transformer")
 tf.app.flags.DEFINE_string("decoder_type", "attn", "Decoder type: lstm|attn")
 tf.app.flags.DEFINE_string("loss_type", "unsup", "Loss type: sup|unsup")
 tf.app.flags.DEFINE_string("model", "ultra_lm", "Model: simple_lm|ultra_lm")
 tf.app.flags.DEFINE_boolean("early_stop", True, "Set True to turn on early stop.")
+tf.app.flags.DEFINE_boolean("segmented", False, "Set True to read segmented text data.")
 tf.app.flags.DEFINE_string("data_dir", "./text_corpus", "Data directory")
 tf.app.flags.DEFINE_string("train_dir", "./model", "Training directory.")
-tf.app.flags.DEFINE_string("embedding_files", "./embeddings/char_100.txt", "Pretrained embedding files.")
+tf.app.flags.DEFINE_string("embedding_files", "./embeddings/zh_char_300_nlpcc.txt", "Pretrained embedding files.")
 tf.app.flags.DEFINE_integer("steps_per_checkpoint", 20000,
                             "How many training steps to do per checkpoint.")
 tf.app.flags.DEFINE_integer("steps_limit", 100000000,
@@ -89,18 +90,19 @@ def create_train_graph(session, vocab, posseg_vocab):
         vocab,
         posseg_vocab,
         FLAGS.batch_size,
-        data_paths)
+        data_paths,
+        segmented=FLAGS.segmented)
     dataset.init(session)
 
     """Create language model and initialize or load parameters in session."""
-    seqs, segs, pos_labels = dataset.next_batch
+    seqs, segs, = dataset.next_batch
     model = lm_model.LM_Model(
         seqs,
         True,
         FLAGS.vocab_size, FLAGS.vocab_dim,
         FLAGS.size, FLAGS.num_layers,
         segs=segs,
-        pos_labels=pos_labels,
+        pos_labels=None,
         num_pos_tags=posseg_vocab.size(),
         block_type=FLAGS.block_type,
         decoder_type=FLAGS.decoder_type,
@@ -148,6 +150,8 @@ def train():
         # Create model.
         with tf.device('/gpu:{0}'.format(FLAGS.gpu_id)):
             dataset, model = create_train_graph(sess, vocab, posseg_vocab)
+        if not os.path.exists(FLAGS.train_dir):
+            os.makedirs(FLAGS.train_dir)
         checkpoint_path = os.path.join(FLAGS.train_dir, "lm.ckpt")
         model.saver.save(sess, checkpoint_path, global_step=model.global_step)
 
