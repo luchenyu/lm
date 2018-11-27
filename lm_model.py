@@ -49,7 +49,7 @@ class LM_Model(object):
                  model="ultra_lm",
                  embedding_init=None,
                  dropout=0.0,
-                 learning_rate=0.001, clr_period=100000,
+                 learning_rate=0.0001, clr_period=100000,
                  reuse=None,
                  scope="lm"):
         """Create the model.
@@ -107,11 +107,13 @@ class LM_Model(object):
                 dtype=tf.float32,
                 initializer=learning_rate,
                 trainable=False)
+            self.max_learning_rate = learning_rate
             clr_period = tf.get_variable(
                 "clr_period",
                 dtype=tf.float32,
                 initializer=float(clr_period),
                 trainable=False)
+            self.clr_period = clr_period
             x = (tf.to_float(self.global_step) % clr_period) / clr_period
             learning_rate = tf.cond(
                 tf.less(x, ratio),
@@ -306,33 +308,70 @@ class LM_Model(object):
                     max_char_length = tf.shape(segmented_seqs)[2]
                     masks = tf.greater(segmented_seqs, 0)
 
-                    inputs = tf.nn.embedding_lookup(self.input_embedding, segmented_seqs)
-                    cnn_outputs = model_utils.convolution2d(
-                        inputs,
-                        [self.size]*4,
-                        [[1,1],[1,2],[1,3],[1,4]],
+                    char_embeds = tf.nn.embedding_lookup(self.input_embedding, segmented_seqs)
+                    l1_embeds = model_utils.convolution2d(
+                        char_embeds,
+                        [self.size]*2,
+                        [[1,2],[1,3]],
+                        activation_fn=tf.nn.relu,
+                        is_training=self.training,
+                        scope="l1_convs")
+                    char_embeds = tf.nn.max_pool(char_embeds, [1,1,2,1], [1,1,2,1], padding='SAME')
+                    l2_embeds = model_utils.convolution2d(
+                        char_embeds,
+                        [self.size]*2,
+                        [[1,2],[1,3]],
+                        activation_fn=tf.nn.relu,
+                        is_training=self.training,
+                        scope="l2_convs")
+                    concat_embeds = tf.concat(
+                        [tf.reduce_max(tf.nn.relu(char_embeds), axis=2),
+                         tf.reduce_max(l1_embeds, axis=2),
+                         tf.reduce_max(l2_embeds, axis=2)],
+                        axis=-1)
+                    word_embeds = model_utils.highway(
+                        concat_embeds,
+                        2,
                         activation_fn=tf.nn.relu,
                         dropout=1.0-self.dropout,
                         is_training=self.training,
-                        scope="convs")
-                    cnn_outputs = tf.reduce_max(cnn_outputs, axis=2)
-                    word_embeds = model_utils.highway(
-                        cnn_outputs,
-                        2,
-                        activation_fn=tf.nn.relu,
-                        is_training=self.training,
                         scope="highway")
+                    word_embeds = tf.contrib.layers.layer_norm(word_embeds, begin_norm_axis=-1)
                     word_embeds = model_utils.fully_connected(
                         word_embeds,
                         self.size,
                         is_training=self.training,
                         scope="projs")
+                    word_embeds += model_utils.MLP(
+                        word_embeds,
+                        2,
+                        2*self.size,
+                        self.size,
+                        dropout=1.0-self.dropout,
+                        is_training=self.training,
+                        scope="MLP")
                     word_embeds = tf.contrib.layers.layer_norm(word_embeds, begin_norm_axis=-1)
 
                     weights = tf.to_float(tf.reduce_any(masks, axis=2, keepdims=True))
                     word_embeds *= weights
                     word_masks = tf.reduce_any(masks, axis=2)
                 return word_embeds, word_masks
+
+            def encode_words(word_embeds, attn_masks, reuse=None):
+                """
+                encode seq of words, include embeds and contexts
+                segmented_seqs: batch_size x max_length x max_char_length
+                """
+
+                with tf.variable_scope("encoder", reuse=reuse):
+                    attn_encodes = model_utils.transformer2(
+                        word_embeds,
+                        self.num_layers,
+                        masks=attn_masks,
+                        dropout=1.0-self.dropout,
+                        is_training=self.training,
+                        scope="transformer")
+                return attn_encodes
 
             def attend_words(querys, word_embeds, attn_masks, reuse=None):
                 """
@@ -352,16 +391,40 @@ class LM_Model(object):
                         scope="transformer")
                 return attn_encodes
 
+            def match_embeds(embedsA, embedsB):
+                """
+                outputs the degree of matchness of the word embeds and contexts
+                embedsA: batch_size x dim
+                embedsB: batch_size x num_candidates x dim or num_candidates x dim
+                """
+
+                with tf.variable_scope("matcher", reuse=reuse):
+                    dim = embedsA.get_shape()[-1].value
+                    if len(embedsB.get_shape()) == 2:
+                        outputs = tf.matmul(
+                            embedsA, embedsB, transpose_b=True)
+                    else:
+                        outputs = tf.matmul(
+                            embedsB, tf.expand_dims(embedsA, axis=-1))
+                        outputs = tf.squeeze(outputs, axis=-1)
+                    outputs /= tf.sqrt(float(dim))
+                return outputs
+
             def discriminate(word_embeds, contexts, reuse=None):
                 """
                 outputs the degree of matchness of the word embeds and contexts
                 """
 
                 with tf.variable_scope("discriminator", reuse=reuse):
+                    contexts_proj = model_utils.fully_connected(
+                        contexts,
+                        word_embeds.get_shape()[-1].value,
+                        is_training=self.training,
+                        scope="contexts_proj")
                     outputs = tf.matmul(
-                        tf.expand_dims(word_embeds, axis=-2),
-                        tf.expand_dims(contexts, axis=-1))
-                    outputs = tf.squeeze(tf.squeeze(outputs, axis=-1), axis=-1)
+                        word_embeds,
+                        tf.expand_dims(contexts_proj, axis=-1))
+                    outputs = tf.squeeze(outputs, axis=-1)
                     outputs /= tf.sqrt(float(self.size))
                 return outputs
 
@@ -375,6 +438,14 @@ class LM_Model(object):
                         initializer = tf.initializers.constant(embedding_init)
                     else:
                         initializer = tf.initializers.truncated_normal(0.0, 0.01)
+                    posit_embedding = tf.get_variable(
+                        "posit_embedding",
+                        shape=[1000, self.size],
+                        dtype=tf.float32,
+                        initializer=tf.initializers.truncated_normal(0.0, 0.01),
+                        trainable=trainable,
+                        collections=collections)
+                    self.posit_embedding = posit_embedding
                     char_embedding = tf.get_variable(
                         "char_embedding",
                         shape=[self.vocab_size, self.vocab_dim],
@@ -427,9 +498,9 @@ class LM_Model(object):
                     segmented_seqs_gold = tf.stop_gradient(segmented_seqs_gold)
                     max_char_length = tf.shape(segmented_seqs_gold)[2]
                     segmented_seqs_gold = tf.cond(
-                        tf.less(max_char_length, 10),
+                        tf.less(max_char_length, 15),
                         lambda: segmented_seqs_gold,
-                        lambda: segmented_seqs_gold[:,:,:10])
+                        lambda: segmented_seqs_gold[:,:,:15])
                    # seg_predicts.append(segs)
                    # num_sample += 1
                 else:
@@ -720,22 +791,58 @@ class LM_Model(object):
                     max_length = tf.shape(segmented_seqs_gold)[1]
                     word_embeds_gold, word_masks_gold = embed_words(
                         segmented_seqs_gold)
-                    attn_masks = tf.tile(tf.expand_dims(word_masks_gold, 1), [1,max_length,1])
-                    attn_masks = tf.logical_and(attn_masks,
-                        tf.logical_not(tf.eye(max_length, batch_shape=[batch_size], dtype=tf.bool)))
+
+                    posit_ids = tf.tile(tf.expand_dims(tf.range(max_length), 0), [batch_size, 1])
+                   # posit_embeds = tf.nn.embedding_lookup(self.posit_embedding, posit_ids)
+                   # posit_embeds *= tf.to_float(tf.expand_dims(word_masks_gold, -1))
+                    posit_embeds = model_utils.embed_position(
+                        posit_ids,
+                        word_embeds_gold.get_shape()[-1].value)
+
+                    pick_masks = tf.less(tf.random_uniform([batch_size, max_length]), 0.15)
+                    pick_masks = tf.logical_and(pick_masks, word_masks_gold)
+                    masked_word_embeds_gold = word_embeds_gold * \
+                        tf.to_float(tf.expand_dims(tf.logical_not(pick_masks), axis=-1))
                     querys = tf.tile(
                         tf.expand_dims(tf.expand_dims(query_embedding, 0), 1),
-                        [batch_size, max_length, 1])
-                    contexts_gold = attend_words(querys, word_embeds_gold, attn_masks)
+                        [batch_size, 1, 1])
+                    masked_input_embeds_gold = tf.concat(
+                        [querys, masked_word_embeds_gold+posit_embeds], axis=1)
+                    masked_attn_masks = tf.logical_and(word_masks_gold, tf.logical_not(pick_masks))
+                    masked_attn_masks = tf.pad(masked_attn_masks, [[0,0],[1,0]], constant_values=True)
+                    masked_encodes_gold = encode_words(masked_input_embeds_gold, masked_attn_masks)
+                    masked_word_encodes_gold = masked_encodes_gold[:,1:,:]
+                    masked_sent_encodes_gold = masked_encodes_gold[:,0,:]
                     valid_word_embeds_gold = tf.boolean_mask(word_embeds_gold, word_masks_gold)
-                    valid_contexts_gold = tf.boolean_mask(contexts_gold, word_masks_gold)
-                    positive_logits = discriminate(valid_word_embeds_gold, valid_contexts_gold)
-                    idxs = tf.random_shuffle(tf.range(tf.shape(valid_word_embeds_gold)[0]))
-                    negative_logits = discriminate(
-                        tf.gather(valid_word_embeds_gold, idxs), valid_contexts_gold, reuse=True)
-                    discriminator_loss_gold = tf.nn.sigmoid_cross_entropy_with_logits(
-                        labels=tf.ones(tf.shape(positive_logits)), logits=positive_logits-negative_logits)
-                    discriminator_loss_gold = tf.reduce_mean(discriminator_loss_gold)
+                    pick_word_embeds_gold = tf.boolean_mask(word_embeds_gold, pick_masks)
+                    remain_word_embeds_gold = tf.boolean_mask(
+                        word_embeds_gold,
+                        tf.logical_and(word_masks_gold, tf.logical_not(pick_masks)))
+                    pick_word_encodes_gold = tf.boolean_mask(masked_word_encodes_gold, pick_masks)
+                    num_pick_words = tf.shape(pick_word_embeds_gold)[0]
+
+                    neg_idxs = tf.random_uniform(
+                        [num_pick_words, batch_size],
+                        maxval=tf.shape(remain_word_embeds_gold)[0],
+                        dtype=tf.int32)
+                    neg_word_embeds_gold = tf.gather(remain_word_embeds_gold, neg_idxs)
+                    cand_word_embeds_gold = tf.concat(
+                        [tf.expand_dims(pick_word_embeds_gold, 1), neg_word_embeds_gold], axis=1)
+                    pick_word_encodes_gold_proj = model_utils.fully_connected(
+                        pick_word_encodes_gold,
+                        self.size,
+                        is_training=self.training,
+                        scope="word_encodes_proj")
+                    word_logits = match_embeds(
+                        pick_word_encodes_gold_proj, cand_word_embeds_gold)
+                    word_loss_gold = tf.nn.sparse_softmax_cross_entropy_with_logits(
+                        labels=tf.zeros([num_pick_words], dtype=tf.int32), logits=word_logits)
+                    word_loss_gold = tf.reduce_mean(word_loss_gold)
+
+                    input_embeds_gold = tf.concat(
+                        [querys, word_embeds_gold+posit_embeds], axis=1)
+                    attn_masks = tf.pad(word_masks_gold, [[0,0],[1,0]], constant_values=True)
+                    encodes_gold = encode_words(input_embeds_gold, attn_masks, reuse=True)
                    # if pos_labels != None:
                    #     segmented_seq_masks_gold = tf.reduce_any(tf.greater(segmented_seqs_gold, 0), axis=-1)
                    #     segmented_seq_lengths_gold = tf.reduce_sum(tf.to_int32(segmented_seq_masks_gold), axis=-1)
@@ -745,13 +852,13 @@ class LM_Model(object):
                    #         transition_params=transition_params)
                    #     pos_loss = tf.reduce_mean(-log_probs)
 
-                    loss = discriminator_loss_gold
-                    return loss, word_embeds_gold, segmented_seqs_gold, segs, word_masks_gold, seqs
+                    loss = word_loss_gold
+                    return loss, encodes_gold, segmented_seqs_gold, segs, word_masks_gold, seqs
 
 
             self.model = eval(model)
 
-            self.loss, self.embeds, self.segmented_seqs, self.segs, self.masks, self.sample_seqs = self.model(
+            self.loss, self.encodes, self.segmented_seqs, self.segs, self.masks, self.sample_seqs = self.model(
                 self.seqs, segs, pos_labels)
             if trainable:
                 self.optimizer = tf.train.AdamOptimizer(
@@ -785,7 +892,7 @@ class LM_Model(object):
         self.embed_words = wrapper(embed_words)
         self.attend_words = wrapper(attend_words)
 
-    def init(self, session, model_dir=''):
+    def init(self, session, model_dir, kwargs):
         """Initialize the model graph.
 
         """
@@ -794,6 +901,10 @@ class LM_Model(object):
         if ckpt and tf.gfile.Exists(ckpt.model_checkpoint_path+'.meta'):
             print("Reading model parameters from %s" % ckpt.model_checkpoint_path)
             self.saver.restore(session, ckpt.model_checkpoint_path)
+            if kwargs.get('learning_rate') != None:
+                session.run(self.max_learning_rate.assign(kwargs['learning_rate']))
+            if kwargs.get('clr_period') != None:
+                session.run(self.clr_period.assign(kwargs['clr_period']))
         else:
             print("Created model with fresh parameters. ")
             session.run(tf.variables_initializer(self.scope.global_variables()))

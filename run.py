@@ -45,8 +45,8 @@ import tensorflow as tf
 from utils import data_utils
 import lm_dataset, lm_model
 
-tf.app.flags.DEFINE_float("learning_rate", 0.001, "Learning rate.")
-tf.app.flags.DEFINE_integer("clr_period", 100000, "Period of cyclic learning rate.")
+tf.app.flags.DEFINE_float("learning_rate", -1, "Learning rate.")
+tf.app.flags.DEFINE_integer("clr_period", -1, "Period of cyclic learning rate.")
 tf.app.flags.DEFINE_integer("batch_size", 64,
                             "Batch size to use during training.")
 tf.app.flags.DEFINE_float("dropout", 0.1, "Dropout rate.")
@@ -96,22 +96,24 @@ def create_train_graph(session, vocab, posseg_vocab):
 
     """Create language model and initialize or load parameters in session."""
     seqs, segs, = dataset.next_batch
+    kwargs = {'segs': segs,
+              'block_type': FLAGS.block_type,
+              'decoder_type': FLAGS.decoder_type,
+              'loss_type': FLAGS.loss_type,
+              'model': FLAGS.model,
+              'embedding_init': vocab.embedding_init,
+              'dropout': FLAGS.dropout}
+    if FLAGS.learning_rate > 0:
+        kwargs['learning_rate'] = FLAGS.learning_rate
+    if FLAGS.clr_period > 0:
+        kwargs['clr_period'] = FLAGS.clr_period
     model = lm_model.LM_Model(
         seqs,
         True,
         FLAGS.vocab_size, FLAGS.vocab_dim,
         FLAGS.size, FLAGS.num_layers,
-        segs=segs,
-        pos_labels=None,
-        num_pos_tags=posseg_vocab.size(),
-        block_type=FLAGS.block_type,
-        decoder_type=FLAGS.decoder_type,
-        loss_type=FLAGS.loss_type,
-        model=FLAGS.model,
-        embedding_init=vocab.embedding_init,
-        dropout=FLAGS.dropout,
-        learning_rate=FLAGS.learning_rate, clr_period=FLAGS.clr_period)
-    model.init(session, FLAGS.train_dir)
+        **kwargs)
+    model.init(session, FLAGS.train_dir, kwargs)
 
     return dataset, model
 
@@ -160,6 +162,7 @@ def train():
         current_step = 0
         previous_losses = []
         eval_loss_best = sys.float_info.max
+        log_file = open(os.path.join(FLAGS.train_dir, 'train_log.txt'), 'a', 0)
         while True:
             start_time = time.time()
             input_feed = {dataset.handle: dataset.handles['train']}
@@ -172,9 +175,9 @@ def train():
             # Once in a while, we save checkpoint, print statistics, and run evals.
             if current_step % FLAGS.steps_per_checkpoint == 0:
                 # Print statistics for the previous epoch.
-                print ("global step %d learning rate %.8f step-time %.4f loss "
+                log_file.write("global step %d learning rate %.8f step-time %.4f loss "
                        "%.4f" % (model.global_step.eval(), model.learning_rate.eval(),
-                                 step_time, loss))
+                                 step_time, loss) + '\n')
                 # Run evals on development set and print their perplexity.
                 eval_losses = []
                 input_feed = {dataset.handle:dataset.handles['valid']}
@@ -185,7 +188,7 @@ def train():
                 except:
                     dataset.reset(sess, 'valid')
                 eval_loss = sum(eval_losses) / len(eval_losses)
-                print("  eval loss %.4f" % eval_loss)
+                log_file.write("  eval loss %.4f" % eval_loss + '\n')
                 previous_losses.append(eval_loss)
                 sys.stdout.flush()
                 # Save checkpoint and zero timer and loss.
@@ -203,6 +206,7 @@ def train():
                 step_time, loss = 0.0, 0.0
             if model.global_step.eval() >= FLAGS.steps_limit:
                 break
+        log_file.close()
 
 def sample():
 
