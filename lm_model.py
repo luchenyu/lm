@@ -351,11 +351,22 @@ class LM_Model(object):
                         is_training=self.training,
                         scope="MLP")
                     word_embeds = tf.contrib.layers.layer_norm(word_embeds, begin_norm_axis=-1)
+                    logits = tf.matmul(
+                        tf.reshape(tf.stop_gradient(word_embeds), [batch_size*max_word_length, self.size]),
+                        tf.math.l2_normalize(self.word_embedding_key, axis=-1), transpose_b=True)
+                    logits = tf.reshape(logits, [batch_size, max_word_length, 10000])
+                    word_ids = tf.argmax(logits, -1, output_type=tf.int32)
+                    word_embeds_extra = tf.nn.embedding_lookup(self.word_embedding_value, word_ids)
+                    word_embeds += word_embeds_extra
 
                     weights = tf.to_float(tf.reduce_any(masks, axis=2, keepdims=True))
                     word_embeds *= weights
                     word_masks = tf.reduce_any(masks, axis=2)
-                return word_embeds, word_masks
+                    word_match_loss = tf.nn.softmax_cross_entropy_with_logits(
+                        labels=tf.nn.softmax(logits), logits=logits)
+                    weights = tf.squeeze(weights, axis=-1)
+                    word_match_loss = tf.reduce_sum(word_match_loss * weights) / tf.reduce_sum(weights)
+                return word_embeds, word_masks, word_ids, word_match_loss
 
             def encode_words(word_embeds, attn_masks, reuse=None):
                 """
@@ -453,6 +464,22 @@ class LM_Model(object):
                         initializer=initializer,
                         trainable=trainable,
                         collections=collections)
+                    word_embedding_key = tf.get_variable(
+                        "word_embedding_key",
+                        shape=[10000, self.size],
+                        dtype=tf.float32,
+                        initializer=tf.initializers.truncated_normal(0.0, 0.01),
+                        trainable=trainable,
+                        collections=collections)
+                    word_embedding_value = tf.get_variable(
+                        "word_embedding_value",
+                        shape=[10000, self.size],
+                        dtype=tf.float32,
+                        initializer=tf.initializers.truncated_normal(0.0, 0.01),
+                        trainable=trainable,
+                        collections=collections)
+                    self.word_embedding_key = word_embedding_key
+                    self.word_embedding_value = word_embedding_value
                     input_embedding = tf.concat([tf.zeros([1, self.vocab_dim]), char_embedding[1:]], axis=0)
                     self.input_embedding = input_embedding
                     output_embedding = model_utils.fully_connected(
@@ -789,7 +816,7 @@ class LM_Model(object):
                 else:
                     batch_size = tf.shape(segmented_seqs_gold)[0]
                     max_length = tf.shape(segmented_seqs_gold)[1]
-                    word_embeds_gold, word_masks_gold = embed_words(
+                    word_embeds_gold, word_masks_gold, word_ids_gold, word_match_loss_gold = embed_words(
                         segmented_seqs_gold)
 
                     posit_ids = tf.tile(tf.expand_dims(tf.range(max_length), 0), [batch_size, 1])
@@ -819,6 +846,7 @@ class LM_Model(object):
                         word_embeds_gold,
                         tf.logical_and(word_masks_gold, tf.logical_not(pick_masks)))
                     pick_word_encodes_gold = tf.boolean_mask(masked_word_encodes_gold, pick_masks)
+                    pick_word_ids_gold = tf.boolean_mask(word_ids_gold, pick_masks)
                     num_pick_words = tf.shape(pick_word_embeds_gold)[0]
 
                     neg_idxs = tf.random_uniform(
@@ -838,6 +866,12 @@ class LM_Model(object):
                     word_loss_gold = tf.nn.sparse_softmax_cross_entropy_with_logits(
                         labels=tf.zeros([num_pick_words], dtype=tf.int32), logits=word_logits)
                     word_loss_gold = tf.reduce_mean(word_loss_gold)
+                   # word_logits = tf.matmul(
+                   #     pick_word_encodes_gold_proj,
+                   #     tf.math.l2_normalize(self.word_embedding, axis=-1), transpose_b=True)
+                   # word_loss_gold = tf.nn.sparse_softmax_cross_entropy_with_logits(
+                   #     labels=pick_word_ids_gold, logits=word_logits)
+                   # word_loss_gold = tf.reduce_mean(word_loss_gold)
 
                     input_embeds_gold = tf.concat(
                         [querys, word_embeds_gold+posit_embeds], axis=1)
@@ -852,13 +886,13 @@ class LM_Model(object):
                    #         transition_params=transition_params)
                    #     pos_loss = tf.reduce_mean(-log_probs)
 
-                    loss = word_loss_gold
-                    return loss, encodes_gold, segmented_seqs_gold, segs, word_masks_gold, seqs
+                    loss = word_loss_gold + word_match_loss_gold
+                    return loss, encodes_gold, segmented_seqs_gold, segs, word_masks_gold, seqs, word_ids_gold
 
 
             self.model = eval(model)
 
-            self.loss, self.encodes, self.segmented_seqs, self.segs, self.masks, self.sample_seqs = self.model(
+            self.loss, self.encodes, self.segmented_seqs, self.segs, self.masks, self.sample_seqs, self.word_ids = self.model(
                 self.seqs, segs, pos_labels)
             if trainable:
                 self.optimizer = tf.train.AdamOptimizer(

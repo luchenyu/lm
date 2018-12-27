@@ -150,8 +150,7 @@ def train():
             os.path.join(data_utils.__location__, 'pos_vocab'))
 
         # Create model.
-        with tf.device('/gpu:{0}'.format(FLAGS.gpu_id)):
-            dataset, model = create_train_graph(sess, vocab, posseg_vocab)
+        dataset, model = create_train_graph(sess, vocab, posseg_vocab)
         if not os.path.exists(FLAGS.train_dir):
             os.makedirs(FLAGS.train_dir)
         checkpoint_path = os.path.join(FLAGS.train_dir, "lm.ckpt")
