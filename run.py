@@ -96,7 +96,7 @@ def create_train_graph(session, vocab, posseg_vocab):
 
     """Create language model and initialize or load parameters in session."""
     seqs, segs, = dataset.next_batch
-    kwargs = {'segs': segs,
+    kwargs = {'segs': [segs],
               'block_type': FLAGS.block_type,
               'decoder_type': FLAGS.decoder_type,
               'loss_type': FLAGS.loss_type,
@@ -108,7 +108,7 @@ def create_train_graph(session, vocab, posseg_vocab):
     if FLAGS.clr_period > 0:
         kwargs['clr_period'] = FLAGS.clr_period
     model = lm_model.LM_Model(
-        seqs,
+        [seqs],
         True,
         FLAGS.vocab_size, FLAGS.vocab_dim,
         FLAGS.size, FLAGS.num_layers,
@@ -123,7 +123,7 @@ def create_infer_graph(session, vocab, posseg_vocab):
 
     """Create language model and initialize or load parameters in session."""
     model = lm_model.LM_Model(
-        seqs_placeholder,
+        [seqs_placeholder],
         False,
         FLAGS.vocab_size, FLAGS.vocab_dim,
         FLAGS.size, FLAGS.num_layers,
