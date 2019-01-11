@@ -425,60 +425,232 @@ class LM_Model(object):
                         is_training=self.training,
                         scope="MLP")
                     word_embeds = tf.contrib.layers.layer_norm(word_embeds, begin_norm_axis=-1)
-                    logits = tf.matmul(
-                        tf.reshape(tf.stop_gradient(word_embeds), [batch_size*max_word_length, self.size]),
-                        tf.math.l2_normalize(self.word_embedding_key, axis=-1), transpose_b=True)
-                    logits = tf.reshape(
-                        logits,
-                        [batch_size, max_word_length, self.num_categories, self.category_size])
-                    word_ids = tf.argmax(logits, -1, output_type=tf.int32)
-                    word_ids += tf.reshape(
-                        tf.range(self.num_categories)*self.category_size,
-                        [1,1,self.num_categories])
-                    word_embeds_extra = tf.nn.embedding_lookup(self.word_embedding_value, word_ids)
-                    word_embeds += tf.reduce_sum(word_embeds_extra, axis=2)
-                    word_embeds = tf.contrib.layers.layer_norm(word_embeds, begin_norm_axis=-1)
 
                     masksLeft = tf.pad(masks, [[0,0],[1,0]])[:,:-1]
                     masksRight = tf.pad(masks, [[0,0],[0,1]])[:,1:]
                     word_masks = tf.logical_or(masks, tf.logical_or(masksLeft, masksRight))
-                    word_embed_loss = tf.nn.softmax_cross_entropy_with_logits(
-                        labels=tf.nn.softmax(logits), logits=logits)
-                    word_embed_loss = tf.reduce_mean(word_embed_loss, axis=-1)
-                return word_embeds, word_masks, word_ids, word_embed_loss
+                return word_embeds, word_masks, 0, 0.0
 
-            def encode_words(word_embeds, attn_masks, reuse=None):
+            def embed_words2(segmented_seqs, reuse=None):
+                """
+                embed seq of words into vectors
+                """
+                with tf.variable_scope("word_embedder", reuse=reuse):
+
+                    batch_size = tf.shape(segmented_seqs)[0]
+                    max_word_length = tf.shape(segmented_seqs)[1]
+                    max_char_length = tf.shape(segmented_seqs)[2]
+                    masks = tf.reduce_any(tf.greater(segmented_seqs, 0), axis=2)
+
+                    char_embeds = tf.nn.embedding_lookup(self.input_embedding, segmented_seqs)
+                    conv_embeds = model_utils.convolution2d(
+                        char_embeds,
+                        [self.size]*4,
+                        [[1,1],[1,2],[1,3],[1,4]],
+                        activation_fn=tf.nn.relu,
+                        is_training=self.training,
+                        scope="conv_embeds")
+                    word_embeds = tf.reduce_max(conv_embeds, axis=2)
+                    word_embeds = model_utils.highway(
+                        word_embeds,
+                        2,
+                        activation_fn=tf.nn.relu,
+                        dropout=1.0-self.dropout,
+                        is_training=self.training,
+                        scope="highway")
+                    word_embeds = tf.contrib.layers.layer_norm(word_embeds, begin_norm_axis=-1)
+                    word_embeds = model_utils.fully_connected(
+                        word_embeds,
+                        self.size,
+                        is_training=self.training,
+                        scope="projs")
+
+                    num_splits = 16
+                    num_categories = self.word_embedding_value.get_shape()[0].value
+                    word_assign_norms = tf.norm(
+                        tf.stack(tf.split(tf.expand_dims(word_embeds, axis=-2) - self.word_embedding_value,
+                                          num_splits, axis=-1), axis=-2),
+                        axis=-1)
+                    word_assign_ids = tf.argmin(word_assign_norms, axis=-2, output_type=tf.int32)
+                    inverse_assign_ids = tf.argmin(
+                        tf.reshape(word_assign_norms, [batch_size*max_word_length, num_categories, num_splits]),
+                        axis=0, output_type=tf.int32)
+                    word_embeds_quantised = []
+                    word_embed_loss = []
+                    for we, wid, ev, iid in zip(tf.split(word_embeds, num_splits, axis=-1)[1:],
+                                                tf.unstack(word_assign_ids, axis=-1)[1:],
+                                                tf.split(self.word_embedding_value, num_splits, axis=1)[1:],
+                                                tf.unstack(inverse_assign_ids, axis=0)[1:]):
+                        quantised_embeds = tf.nn.embedding_lookup(ev, wid)
+                        word_embeds_quantised.append(quantised_embeds)
+                        mean_embedding = tf.unsorted_segment_mean(
+                            we, wid, num_categories)
+                        inverse_embedding = tf.nn.embedding_lookup(
+                            tf.reshape(we, [batch_size*max_word_length, int(self.size/num_splits)]),
+                            iid)
+                        target_embedding = tf.where(
+                            tf.reduce_all(tf.equal(mean_embedding, 0), axis=-1),
+                            inverse_embedding,
+                            mean_embedding)
+                        word_embed_loss.append(
+                            tf.reduce_mean(
+                                tf.reduce_sum(tf.square(ev - tf.stop_gradient(target_embedding)), axis=-1)))
+
+                    word_embeds_quantised = tf.split(word_embeds, num_splits, axis=-1)[:1] + word_embeds_quantised
+                    word_embeds_quantised = tf.concat(word_embeds_quantised, axis=-1)
+                    word_embed_loss = sum(word_embed_loss)
+                    word_embed_loss += 0.25*tf.reduce_sum(
+                        tf.square(word_embeds - tf.stop_gradient(word_embeds_quantised)), axis=-1)
+
+                    @tf.custom_gradient
+                    def quantise_embeds(word_embeds, word_embeds_quantised):
+                        def grad_fn(dy):
+                            return [dy, None]
+                        return word_embeds_quantised, grad_fn
+                    word_embeds_quantised = quantise_embeds(word_embeds, word_embeds_quantised)
+
+                    masksLeft = tf.pad(masks, [[0,0],[1,0]])[:,:-1]
+                    masksRight = tf.pad(masks, [[0,0],[0,1]])[:,1:]
+                    word_masks = tf.logical_or(masks, tf.logical_or(masksLeft, masksRight))
+                    word_embed_loss = tf.reduce_sum(word_embed_loss*tf.to_float(word_masks)) / \
+                                      tf.reduce_sum(tf.to_float(word_masks))
+                return word_embeds_quantised, word_masks, word_assign_ids, word_embed_loss
+
+            def embed_words3(segmented_seqs, reuse=None):
+                """
+                embed seq of words into vectors
+                """
+                with tf.variable_scope("word_embedder", reuse=reuse):
+
+                    batch_size = tf.shape(segmented_seqs)[0]
+                    max_word_length = tf.shape(segmented_seqs)[1]
+                    max_char_length = tf.shape(segmented_seqs)[2]
+                    masks = tf.reduce_any(tf.greater(segmented_seqs, 0), axis=2)
+
+                    char_embeds = tf.nn.embedding_lookup(self.input_embedding, segmented_seqs)
+                    conv_embeds = model_utils.convolution2d(
+                        char_embeds,
+                        [self.size]*4,
+                        [[1,1],[1,2],[1,3],[1,4]],
+                        activation_fn=tf.nn.relu,
+                        is_training=self.training,
+                        scope="conv_embeds")
+                    word_embeds = tf.reduce_max(conv_embeds, axis=2)
+                    word_embeds = model_utils.highway(
+                        word_embeds,
+                        2,
+                        activation_fn=tf.nn.relu,
+                        dropout=1.0-self.dropout,
+                        is_training=self.training,
+                        scope="highway")
+                    word_embeds = tf.contrib.layers.layer_norm(word_embeds, begin_norm_axis=-1)
+
+                    word_embeds = model_utils.fully_connected(
+                        word_embeds,
+                        self.size*(1+self.num_categories),
+                        is_training=self.training,
+                        scope="projs")
+                    word_embeds_base, word_embeds_match = tf.split(
+                        word_embeds, [self.size, self.size*self.num_categories], axis=-1)
+
+                    word_assign_norms = tf.matmul(
+                        tf.transpose(
+                            tf.reshape(word_embeds_match, [batch_size*max_word_length, self.num_categories, self.size]),
+                            [1,0,2]),
+                        tf.math.l2_normalize(
+                            tf.reshape(
+                                self.word_embedding_value, [self.num_categories, self.category_size, self.size]),
+                            axis=-1),
+                        transpose_b=True)
+                    word_assign_norms = tf.reshape(
+                        word_assign_norms, [self.num_categories, batch_size, max_word_length, self.category_size])
+                    word_assign_ids = tf.argmax(word_assign_norms, axis=-1, output_type=tf.int32)
+                    word_embeds_quantised = []
+                    word_embed_loss = []
+                    for we, wid, ev in zip(tf.split(word_embeds_match, self.num_categories, axis=-1),
+                                           tf.unstack(word_assign_ids, axis=0),
+                                           tf.split(self.word_embedding_value, self.num_categories, axis=0)):
+                        quantised_embeds = tf.math.l2_normalize(tf.nn.embedding_lookup(ev, wid), axis=-1)
+                        word_embed_loss.append(
+                            tf.norm(we, axis=-1) - tf.reduce_sum(we*quantised_embeds, axis=-1))
+                        word_embeds_quantised.append(tf.norm(we, axis=-1, keepdims=True)*quantised_embeds)
+
+                    word_embeds_quantised = sum(word_embeds_quantised)
+                    word_embed_loss = sum(word_embed_loss)
+
+                    @tf.custom_gradient
+                    def quantise_embeds(word_embeds, word_embeds_quantised):
+                        def grad_fn(dy):
+                            return [dy, None]
+                        return word_embeds_quantised, grad_fn
+                    word_embeds_quantised = quantise_embeds(
+                        sum(tf.split(word_embeds_match, self.num_categories, axis=-1)), word_embeds_quantised)
+                    word_embeds_final = tf.contrib.layers.layer_norm(
+                        word_embeds_base + word_embeds_quantised, begin_norm_axis=-1)
+
+                    masksLeft = tf.pad(masks, [[0,0],[1,0]])[:,:-1]
+                    masksRight = tf.pad(masks, [[0,0],[0,1]])[:,1:]
+                    word_masks = tf.logical_or(masks, tf.logical_or(masksLeft, masksRight))
+                    word_embed_loss = tf.reduce_sum(word_embed_loss*tf.to_float(word_masks)) / \
+                                      tf.reduce_sum(tf.to_float(word_masks))
+                return word_embeds_final, word_masks, word_assign_ids, word_embed_loss
+
+            def encode_words(field_embeds, value_embeds, attn_masks, reuse=None):
                 """
                 encode seq of words, include embeds and contexts
-                word_embeds: batch_size x seq_length x dim
+                field_embeds: batch_size x seq_length x dim
+                value_embeds: batch_size x seq_length x dim
                 attn_masks: batch_size x seq_length
                 """
 
                 with tf.variable_scope("encoder", reuse=reuse):
                     attn_encodes = model_utils.transformer2(
-                        word_embeds,
+                        field_embeds,
                         self.num_layers,
+                        values=value_embeds,
                         masks=attn_masks,
                         dropout=1.0-self.dropout,
                         is_training=self.training,
                         scope="transformer")
                 return attn_encodes
 
-            def match_embeds(embedsA, embedsB):
+            def match_embeds(encodes, token_embeds, task_embeds, reuse=None):
                 """
                 outputs the degree of matchness of the word embeds and contexts
-                embedsA: batch_size x dim
-                embedsB: batch_size x num_candidates x dim or num_candidates x dim
+                encodes: batch_size x dim
+                token_embeds: batch_size x num_candidates x dim or num_candidates x dim
+                task_embeds: dim
                 """
 
-                with tf.variable_scope("matcher", reuse=None):
-                    dim = embedsA.get_shape()[-1].value
-                    if len(embedsB.get_shape()) == 2:
+                with tf.variable_scope("matcher", reuse=reuse):
+                    dim = encodes.get_shape()[-1].value
+
+                    if len(token_embeds.get_shape()) == 2:
+                        task_embeds = tf.tile(tf.expand_dims(task_embeds, axis=0), [tf.shape(token_embeds)[0], 1])
+                        token_embeds_proj = model_utils.MLP(
+                            tf.concat([task_embeds, token_embeds], axis=-1),
+                            2,
+                            self.size,
+                            dim,
+                            dropout=1.0-self.dropout,
+                            is_training=self.training,
+                            scope="token_projs")
                         outputs = tf.matmul(
-                            embedsA, embedsB, transpose_b=True)
+                            encodes, token_embeds_proj, transpose_b=True)
                     else:
+                        task_embeds = tf.tile(
+                            tf.expand_dims(tf.expand_dims(task_embeds, axis=0), axis=1),
+                            [tf.shape(token_embeds)[0], tf.shape(token_embeds)[1], 1])
+                        token_embeds_proj = model_utils.MLP(
+                            tf.concat([task_embeds, token_embeds], axis=-1),
+                            2,
+                            self.size,
+                            dim,
+                            dropout=1.0-self.dropout,
+                            is_training=self.training,
+                            scope="token_projs")
                         outputs = tf.matmul(
-                            embedsB, tf.expand_dims(embedsA, axis=-1))
+                            token_embeds_proj, tf.expand_dims(encodes, axis=-1))
                         outputs = tf.squeeze(outputs, axis=-1)
                     outputs /= tf.sqrt(float(dim))
                 return outputs
@@ -491,7 +663,15 @@ class LM_Model(object):
                 """
 
                 with tf.variable_scope("generator", reuse=reuse):
+
+                    attn_cell = model_utils.AttentionCell(
+                        size,
+                        num_layer=2,
+                        dropout=1.0-dropout,
+                        is_training=self.training)
+
                     batch_size = tf.shape(encodes)[0]
+                    dim = self.output_embedding.get_shape()[-1].value
 
                     decInputs = tf.TensorArray(tf.float32, 0,
                         dynamic_size=True, clear_after_read=False, infer_shape=False)
@@ -503,11 +683,11 @@ class LM_Model(object):
                     decMasks = tf.greater(targetIds, 0)
                     decMasks = tf.logical_or(decMasks, tf.pad(decMasks, [[0,0],[1,0]])[:,:-1])
                     decLength = tf.shape(inputs)[1]
-                    outputs, state = self.attn_cell(inputs, initialState)
+                    outputs, state = attn_cell(inputs, initialState)
                     logits = tf.matmul(
                         tf.reshape(outputs, [batch_size*decLength, outputs.get_shape()[-1].value]),
                         self.output_embedding,
-                        transpose_b=True)
+                        transpose_b=True) / tf.sqrt(float(dim))
                     logits = tf.reshape(logits, [batch_size, decLength, self.vocab_size])
                     losses = tf.nn.sparse_softmax_cross_entropy_with_logits(
                         labels=targetIds,
@@ -515,30 +695,52 @@ class LM_Model(object):
                     loss = tf.reduce_sum(losses) / tf.reduce_sum(tf.to_float(decMasks))
                 return loss
 
-            def generate(encodes, encMasks, length=50, beam_size=100, num_candidates=1, reuse=None):
+            def generate_word(encodes, encMasks, length=6, beam_size=64, num_candidates=1, reuse=None):
                 """
-                encodes: batch_size x enc_seq_length x dim
-                encMasks: batch_size x enc_seq_length
+                args:
+                    encodes: batch_size x enc_seq_length x dim
+                    encMasks: batch_size x enc_seq_length
+
+                return:
+                    candidates: batch_size x num_candidates x length
+                    scores: batch_size x num_candidates
                 """
 
                 with tf.variable_scope("generator", reuse=reuse):
+
+                    attn_cell = model_utils.AttentionCell(
+                        size,
+                        num_layer=2,
+                        dropout=1.0-dropout,
+                        is_training=self.training)
 
                     decInputs = tf.TensorArray(tf.float32, 0,
                         dynamic_size=True, clear_after_read=False, infer_shape=False)
                     initialState = (decInputs, encodes, encMasks)
 
-                    logit_fn = lambda outputs: tf.matmul(outputs, self.output_embedding, transpose_b=True)
+                    logit_fn = lambda outputs: tf.matmul(outputs, self.output_embedding, transpose_b=True) / \
+                        tf.sqrt(float(self.output_embedding.get_shape()[-1].value))
 
                     candidates, scores = model_utils.beam_dec(
                         length,
                         initialState,
                         self.input_embedding,
-                        self.attn_cell,
+                        attn_cell,
                         logit_fn,
                         gamma=0.65,
                         beam_size=beam_size,
                         num_candidates=num_candidates)
                 return candidates, scores
+
+            def sample_field(input_embeds, field_id=0, word_length=20, reuse=None):
+                """
+                args:
+                    input_embeds: batch_size x input_length x dim
+
+                return:
+                    candidates: batch_size x seq_length
+                """
+                return candidates
 
             """ lm model """
             def ultra_lm(pieces):
@@ -568,8 +770,18 @@ class LM_Model(object):
                     output_embedding = tf.contrib.layers.layer_norm(output_embedding, begin_norm_axis=-1)
                     self.output_embedding = output_embedding
 
-                    self.num_categories = 16
-                    self.category_size = 128
+                    embed_words_fn = embed_words
+                    self.num_categories = 0
+                    self.category_size = 0
+
+                   # embed_words_fn = embed_words2
+                   # self.num_categories = 1
+                   # self.category_size = 16
+
+                   # embed_words_fn = embed_words3
+                   # self.num_categories = 8
+                   # self.category_size = 512
+
                     word_embedding_key = tf.get_variable(
                         "word_embedding_key",
                         shape=[self.num_categories*self.category_size, self.size],
@@ -587,14 +799,6 @@ class LM_Model(object):
                     self.word_embedding_key = word_embedding_key
                     self.word_embedding_value = word_embedding_value
 
-                    query_embedding = tf.get_variable(
-                        "query_embedding",
-                        shape=[self.size],
-                        dtype=tf.float32,
-                        initializer=tf.initializers.truncated_normal(0.0, 0.01),
-                        trainable=trainable,
-                        collections=collections)
-
                     field_embedding = tf.get_variable(
                         "field_embedding",
                         shape=[10, self.size],
@@ -602,7 +806,16 @@ class LM_Model(object):
                         initializer=tf.initializers.truncated_normal(0.0, 0.01),
                         trainable=trainable,
                         collections=collections)
+                    self.field_embedding = field_embedding
 
+                    task_embedding = tf.get_variable(
+                        "task_embedding",
+                        shape=[10, self.size],
+                        dtype=tf.float32,
+                        initializer=tf.initializers.truncated_normal(0.0, 0.01),
+                        trainable=trainable,
+                        collections=collections)
+                    self.task_embedding = task_embedding
 
                 num_sample = 1
                 seg_loss_gold_list, seg_loss_hyp_list, segmented_seqs_gold_list, segmented_seqs_hyp_list, \
@@ -617,12 +830,6 @@ class LM_Model(object):
                 seg_loss_gold = sum(
                     map(lambda (loss, weights): tf.reduce_sum(loss*weights) / tf.reduce_sum(weights),
                         zip(seg_loss_gold_list, seg_weights_list)))
-
-                self.attn_cell = model_utils.AttentionCell(
-                    size,
-                    num_layer=2,
-                    dropout=1.0-dropout,
-                    is_training=self.training)
 
                 def logit_fn(outputs):
                     logits = tf.matmul(outputs, output_embedding, transpose_b=True)
@@ -878,20 +1085,19 @@ class LM_Model(object):
                     return loss, word_encodes_hyp, segmented_seqs_hyp, seg_predicts, None, seqs
 
                 else:
-                    word_embeds_gold_list, word_masks_gold_list, word_ids_gold_list, word_embed_loss_gold_list = \
-                        [],[],[],[]
-                    pick_masks_gold_list, input_embeds_gold_list, masked_input_embeds_gold_list = [],[],[]
-                    max_word_len = 0
+                    word_embeds_gold_list, word_masks_gold_list, word_ids_gold_list = [],[],[]
+                    seq_length_gold_list, pick_masks_gold_list, field_embeds_gold_list = [],[],[]
+                    word_embed_loss_gold_list, word_select_loss_gold_list, word_gen_loss_gold_list = [],[],[]
+                    reuse=None
                     for i, segmented_seqs_gold in enumerate(segmented_seqs_gold_list):
 
                         batch_size = tf.shape(segmented_seqs_gold)[0]
                         max_length = tf.shape(segmented_seqs_gold)[1]
-
-                        max_word_len = tf.maximum(max_word_len, tf.shape(segmented_seqs_gold)[2])
+                        seq_length_gold_list.append(max_length)
 
                         # embed words
-                        word_embeds_gold, word_masks_gold, word_ids_gold, word_embed_loss_gold = embed_words(
-                            segmented_seqs_gold)
+                        word_embeds_gold, word_masks_gold, word_ids_gold, word_embed_loss_gold = embed_words_fn(
+                            segmented_seqs_gold, reuse=reuse)
                         word_embeds_gold_list.append(word_embeds_gold)
                         word_masks_gold_list.append(word_masks_gold)
                         word_ids_gold_list.append(word_ids_gold)
@@ -901,7 +1107,8 @@ class LM_Model(object):
                         posit_embeds = model_utils.embed_position(
                             posit_ids,
                             word_embeds_gold.get_shape()[-1].value)
-                        field_embeds = tf.nn.embedding_lookup(field_embedding, i)
+                        field_embeds = tf.nn.embedding_lookup(field_embedding, i+1) + posit_embeds
+                        field_embeds_gold_list.append(field_embeds)
 
                         pick_masks_gold = tf.less(tf.random_uniform([batch_size, max_length]), 0.15)
                         pick_masks_gold = tf.logical_and(pick_masks_gold, word_masks_gold)
@@ -909,86 +1116,104 @@ class LM_Model(object):
                         masked_word_embeds_gold = word_embeds_gold * \
                             tf.to_float(tf.expand_dims(tf.logical_not(pick_masks_gold), axis=-1))
 
-                        input_embeds_gold = word_embeds_gold+posit_embeds+field_embeds
-                        masked_input_embeds_gold = masked_word_embeds_gold+posit_embeds+field_embeds
-                        input_embeds_gold_list.append(input_embeds_gold)
-                        masked_input_embeds_gold_list.append(masked_input_embeds_gold)
-
-                    segmented_seqs_gold_list = map(
-                        lambda s: tf.pad(s, [[0,0],[0,0],[0,max_word_len-tf.shape(s)[2]]]),
-                        segmented_seqs_gold_list)
-                    segmented_seqs_gold = tf.concat(segmented_seqs_gold_list, axis=1)
-
-                    word_ids_gold = tf.concat(word_ids_gold_list, axis=1)
-                    word_embed_loss_gold = sum(
-                        map(lambda (loss, masks): tf.reduce_sum(loss*tf.to_float(masks)) / \
-                            tf.reduce_sum(tf.to_float(masks)),
-                            zip(word_embed_loss_gold_list, word_masks_gold_list)))
+                        reuse=True
 
                     # get the encodes
-                    word_embeds_gold = tf.concat(word_embeds_gold_list, axis=1)
                     word_masks_gold = tf.concat(word_masks_gold_list, axis=1)
                     pick_masks_gold = tf.concat(pick_masks_gold_list, axis=1)
-                    input_embeds_gold = tf.concat(input_embeds_gold_list, axis=1)
-                    masked_input_embeds_gold = tf.concat(masked_input_embeds_gold_list, axis=1)
+                    field_embeds_gold = tf.concat(
+                        [tf.tile(tf.nn.embedding_lookup(field_embedding, [[0]]), [batch_size,1,1])] + \
+                            field_embeds_gold_list,
+                        axis=1)
+                    word_embeds_gold = tf.pad(tf.concat(word_embeds_gold_list, axis=1), [[0,0],[1,0],[0,0]])
+                    masked_word_embeds_gold = word_embeds_gold * \
+                        tf.to_float(tf.expand_dims(tf.logical_not(tf.pad(pick_masks_gold, [[0,0],[1,0]])), axis=-1))
                     attn_masks = tf.pad(word_masks_gold, [[0,0],[1,0]], constant_values=True)
                     masked_attn_masks = tf.logical_and(word_masks_gold, tf.logical_not(pick_masks_gold))
                     masked_attn_masks = tf.pad(masked_attn_masks, [[0,0],[1,0]], constant_values=True)
-                    querys = tf.tile(
-                        tf.expand_dims(tf.expand_dims(query_embedding, 0), 1),
-                        [batch_size, 1, 1])
-                    input_embeds_gold = tf.concat([querys, input_embeds_gold], axis=1)
-                    masked_input_embeds_gold = tf.concat([querys, masked_input_embeds_gold], axis=1)
-                    encodes_gold = encode_words(input_embeds_gold, attn_masks)
-                    masked_encodes_gold = encode_words(masked_input_embeds_gold, masked_attn_masks, reuse=True)
+                    encodes_gold = encode_words(
+                        field_embeds_gold, word_embeds_gold, attn_masks)
+                    masked_encodes_gold = encode_words(
+                        field_embeds_gold, masked_word_embeds_gold, masked_attn_masks, reuse=True)
 
-                    masked_word_encodes_gold = masked_encodes_gold[:,1:,:]
-                    masked_sent_encodes_gold = masked_encodes_gold[:,0,:]
-                    valid_word_embeds_gold = tf.boolean_mask(word_embeds_gold, word_masks_gold)
-                    pick_word_embeds_gold = tf.boolean_mask(word_embeds_gold, pick_masks_gold)
-                    remain_word_embeds_gold = tf.boolean_mask(
-                        word_embeds_gold,
-                        tf.logical_and(word_masks_gold, tf.logical_not(pick_masks_gold)))
-                    pick_word_encodes_gold = tf.boolean_mask(masked_word_encodes_gold, pick_masks_gold)
-                    pick_segmented_seqs_gold = tf.boolean_mask(segmented_seqs_gold, pick_masks_gold)
-                    num_pick_words = tf.shape(pick_word_embeds_gold)[0]
+                    # get the loss of each piece
+                    encodes_gold_list = tf.split(encodes_gold, [1]+seq_length_gold_list, axis=1)
+                    masked_encodes_gold_list = tf.split(masked_encodes_gold, [1]+seq_length_gold_list, axis=1)
+                    reuse = None
+                    for segmented_seqs_gold, word_embeds_gold, masked_word_encodes_gold, \
+                        word_masks_gold, pick_masks_gold in \
+                        zip(segmented_seqs_gold_list, word_embeds_gold_list, masked_encodes_gold_list[1:],
+                            word_masks_gold_list, pick_masks_gold_list):
 
-                    neg_idxs = tf.random_uniform(
-                        [num_pick_words, batch_size],
-                        maxval=tf.shape(remain_word_embeds_gold)[0],
-                        dtype=tf.int32)
-                    neg_word_embeds_gold = tf.gather(remain_word_embeds_gold, neg_idxs)
-                    cand_word_embeds_gold = tf.concat(
-                        [tf.expand_dims(pick_word_embeds_gold, 1), neg_word_embeds_gold], axis=1)
-                    pick_word_encodes_gold_proj = model_utils.fully_connected(
-                        pick_word_encodes_gold,
-                        self.size,
-                        is_training=self.training,
-                        scope="word_encodes_proj")
-                    word_select_logits = match_embeds(
-                        pick_word_encodes_gold_proj, cand_word_embeds_gold)
-                    word_select_loss_gold = tf.nn.sparse_softmax_cross_entropy_with_logits(
-                        labels=tf.zeros([num_pick_words], dtype=tf.int32), logits=word_select_logits)
-                    word_select_loss_gold = tf.reduce_mean(word_select_loss_gold)
+                        valid_word_embeds_gold = tf.boolean_mask(word_embeds_gold, word_masks_gold)
+                        pick_word_embeds_gold = tf.boolean_mask(word_embeds_gold, pick_masks_gold)
+                        remain_word_embeds_gold = tf.boolean_mask(
+                            word_embeds_gold,
+                            tf.logical_and(word_masks_gold, tf.logical_not(pick_masks_gold)))
+                        pick_word_encodes_gold = tf.boolean_mask(masked_word_encodes_gold, pick_masks_gold)
+                        pick_segmented_seqs_gold = tf.boolean_mask(segmented_seqs_gold, pick_masks_gold)
+                        num_pick_words = tf.shape(pick_word_embeds_gold)[0]
 
-                    word_gen_loss_gold = train_generator(
-                        tf.expand_dims(pick_word_encodes_gold_proj, 1),
-                        tf.ones([num_pick_words, 1], dtype=tf.bool),
-                        pick_segmented_seqs_gold)
+                        neg_idxs = tf.random_uniform(
+                            [num_pick_words, batch_size],
+                            maxval=tf.shape(remain_word_embeds_gold)[0],
+                            dtype=tf.int32)
+                        neg_word_embeds_gold = tf.gather(remain_word_embeds_gold, neg_idxs)
+                        cand_word_embeds_gold = tf.concat(
+                            [tf.expand_dims(pick_word_embeds_gold, 1), neg_word_embeds_gold], axis=1)
+                        word_select_logits = match_embeds(
+                            pick_word_encodes_gold, cand_word_embeds_gold,
+                            tf.nn.embedding_lookup(task_embedding, 1), reuse=reuse)
+                        word_select_loss_gold = tf.nn.sparse_softmax_cross_entropy_with_logits(
+                            labels=tf.zeros([num_pick_words], dtype=tf.int32), logits=word_select_logits)
+                        word_select_loss_gold = tf.reduce_mean(word_select_loss_gold)
+                        word_select_loss_gold_list.append(word_select_loss_gold)
 
-                    loss = word_select_loss_gold + word_embed_loss_gold + word_gen_loss_gold
-                    return loss, encodes_gold, word_masks_gold, word_ids_gold, segmented_seqs_gold
+                        word_gen_loss_gold = train_generator(
+                            tf.expand_dims(pick_word_encodes_gold, 1),
+                            tf.ones([num_pick_words, 1], dtype=tf.bool),
+                            pick_segmented_seqs_gold, reuse=reuse)
+                        word_gen_loss_gold_list.append(word_gen_loss_gold)
+
+                        reuse = True
+
+                    # get the sentence level loss
+                    sent_encodes_gold = tf.squeeze(masked_encodes_gold_list[0], axis=1)
+                    word_embeds_gold = tf.concat(word_embeds_gold_list, axis=1)
+                    word_masks_gold = tf.concat(word_masks_gold_list, axis=1)
+                    weights = tf.to_float(word_masks_gold)
+                    select_logits = match_embeds(
+                        sent_encodes_gold, word_embeds_gold,
+                        tf.nn.embedding_lookup(task_embedding, 0), reuse=True) * weights
+                    select_probs = tf.exp(select_logits) * weights
+                    select_probs /= (tf.reduce_sum(select_probs, axis=-1, keepdims=True) + 1e-20)
+                    select_ids = tf.random.multinomial(
+                        tf.log(select_probs), 1, output_dtype=tf.int32)
+                    select_oneHot = tf.one_hot(
+                        tf.squeeze(select_ids, axis=1), tf.shape(word_embeds_gold)[1])
+                    select_embeds = tf.reduce_sum(word_embeds_gold * tf.expand_dims(select_oneHot, axis=-1), axis=1)
+                    discriminate_logits = match_embeds(
+                        sent_encodes_gold, select_embeds,
+                        tf.nn.embedding_lookup(task_embedding, 0), reuse=True)
+                    sent_loss_gold = tf.nn.sparse_softmax_cross_entropy_with_logits(
+                        labels=tf.range(batch_size, dtype=tf.int32), logits=discriminate_logits)
+                    sent_loss_gold = tf.reduce_mean(sent_loss_gold)
+
+                    loss_list = [sent_loss_gold] + map(
+                        sum, zip(word_embed_loss_gold_list, word_select_loss_gold_list, word_gen_loss_gold_list))
+                    return loss_list, encodes_gold_list, \
+                           segmented_seqs_gold_list, word_masks_gold_list, word_ids_gold_list
 
 
             self.model = eval(model)
 
-            self.loss, self.encodes, self.masks, self.word_ids, self.segmented_seqs = self.model(
-                self.pieces)
+            self.loss_list, self.encodes_list, self.segmented_seqs_list, self.masks_list, self.word_ids_list = \
+                self.model(self.pieces)
             if trainable:
                 self.optimizer = tf.train.AdamOptimizer(
                     learning_rate=learning_rate)
                 self.update = model_utils.optimize_loss(
-                    self.loss,
+                    sum(self.loss_list),
                     self.global_step,
                     self.optimizer,
                     self.scope.trainable_variables(),
@@ -1016,7 +1241,7 @@ class LM_Model(object):
         self.embed_words = wrapper(embed_words)
         self.encode_words = wrapper(encode_words)
         self.train_generator = wrapper(train_generator)
-        self.generate = wrapper(generate)
+        self.generate_word = wrapper(generate_word)
 
     def init(self, session, model_dir, kwargs):
         """Initialize the model graph.

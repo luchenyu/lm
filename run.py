@@ -165,8 +165,9 @@ def train():
         while True:
             start_time = time.time()
             input_feed = {dataset.handle: dataset.handles['train']}
-            output_feed = [model.loss, model.update]
+            output_feed = [model.loss_list, model.update]
             step_loss, _ = model.step(sess, input_feed, output_feed, training=True)
+            step_loss = sum(step_loss)
             step_time += (time.time() - start_time) / FLAGS.steps_per_checkpoint
             loss += step_loss / FLAGS.steps_per_checkpoint
             current_step += 1
@@ -180,10 +181,10 @@ def train():
                 # Run evals on development set and print their perplexity.
                 eval_losses = []
                 input_feed = {dataset.handle:dataset.handles['valid']}
-                output_feed = model.loss
+                output_feed = model.loss_list
                 try:
                     while True:
-                        eval_losses.append(model.step(sess, input_feed, output_feed, training=False))
+                        eval_losses.append(sum(model.step(sess, input_feed, output_feed, training=False)))
                 except:
                     dataset.reset(sess, 'valid')
                 eval_loss = sum(eval_losses) / len(eval_losses)
