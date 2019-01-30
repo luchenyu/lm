@@ -47,8 +47,8 @@ import lm_dataset, lm_model
 
 tf.app.flags.DEFINE_float("learning_rate", -1, "Learning rate.")
 tf.app.flags.DEFINE_integer("clr_period", -1, "Period of cyclic learning rate.")
-tf.app.flags.DEFINE_integer("batch_size", 64,
-                            "Batch size to use during training.")
+tf.app.flags.DEFINE_integer("batch_size", 64, "Batch size to use during training.")
+tf.app.flags.DEFINE_integer("max_length", 150, "Max length allowed for samples.")
 tf.app.flags.DEFINE_float("dropout", 0.1, "Dropout rate.")
 tf.app.flags.DEFINE_integer("size", 256, "Size of each model layer.")
 tf.app.flags.DEFINE_integer("num_layers", 3, "Number of layers in the model.")
@@ -81,21 +81,22 @@ FLAGS = tf.app.flags.FLAGS
 # See seq2seq_model.Seq2SeqModel for details of how they work.
 
 
-def create_train_graph(session, vocab, posseg_vocab):
+def create_dataset(session, vocab):
 
     data_paths = {
         'train': [os.path.join(FLAGS.data_dir, "train"), 'repeat'],
         'valid': [os.path.join(FLAGS.data_dir, "dev"), 'one-shot']}
     dataset = lm_dataset.LM_Dataset(
         vocab,
-        posseg_vocab,
         FLAGS.batch_size,
         data_paths,
+        max_len=FLAGS.max_length,
         segmented=FLAGS.segmented)
     dataset.init(session)
+    return dataset
 
+def create_model(session, seqs, segs, vocab, word_vocab, trainable):
     """Create language model and initialize or load parameters in session."""
-    seqs, segs, = dataset.next_batch
     kwargs = {'segs': [segs],
               'block_type': FLAGS.block_type,
               'decoder_type': FLAGS.decoder_type,
@@ -107,6 +108,16 @@ def create_train_graph(session, vocab, posseg_vocab):
         kwargs['learning_rate'] = FLAGS.learning_rate
     if FLAGS.clr_period > 0:
         kwargs['clr_period'] = FLAGS.clr_period
+
+    """Create word_ids array"""
+    word_list = map(lambda i: word_vocab.idx2key(i), range(word_vocab.size()))
+    count_list = map(lambda i: word_vocab.key2count(i), word_list)
+    word_ids_array = np.array(data_utils.labels_to_ids_array(word_list, vocab))
+    word_count_array = np.array(count_list, dtype=np.float32)
+    kwargs['word_ids_array'] = word_ids_array
+    kwargs['word_count_array'] = word_count_array
+
+    """Create model"""
     model = lm_model.LM_Model(
         [seqs],
         True,
@@ -115,25 +126,7 @@ def create_train_graph(session, vocab, posseg_vocab):
         **kwargs)
     model.init(session, FLAGS.train_dir, kwargs)
 
-    return dataset, model
-
-def create_infer_graph(session, vocab, posseg_vocab):
-
-    seqs_placeholder = tf.placeholder(tf.int32, shape=[None, None])
-
-    """Create language model and initialize or load parameters in session."""
-    model = lm_model.LM_Model(
-        [seqs_placeholder],
-        False,
-        FLAGS.vocab_size, FLAGS.vocab_dim,
-        FLAGS.size, FLAGS.num_layers,
-        block_type=FLAGS.block_type,
-        decoder_type=FLAGS.decoder_type,
-        loss_type=FLAGS.loss_type,
-        model=FLAGS.model)
-    model.init(session, FLAGS.train_dir)
-
-    return seqs_placeholder, model
+    return model
 
 def train():
 
@@ -146,11 +139,14 @@ def train():
         FLAGS.vocab_size = vocab.size()
         if FLAGS.embedding_files != "":
             FLAGS.vocab_dim = vocab.embedding_init.shape[1]
-        posseg_vocab = data_utils.Vocab(
-            os.path.join(data_utils.__location__, 'pos_vocab'))
+        word_vocab = data_utils.Vocab(
+            os.path.join(FLAGS.data_dir, "word_vocab"))
 
         # Create model.
-        dataset, model = create_train_graph(sess, vocab, posseg_vocab)
+        dataset = create_dataset(sess, vocab)
+        seqs, segs = dataset.next_batch
+        with tf.device('/gpu:{0}'.format(FLAGS.gpu_id)):
+            model = create_model(sess, seqs, segs, vocab, word_vocab, True)
         if not os.path.exists(FLAGS.train_dir):
             os.makedirs(FLAGS.train_dir)
         checkpoint_path = os.path.join(FLAGS.train_dir, "lm.ckpt")
@@ -167,7 +163,6 @@ def train():
             input_feed = {dataset.handle: dataset.handles['train']}
             output_feed = [model.loss_list, model.update]
             step_loss, _ = model.step(sess, input_feed, output_feed, training=True)
-            step_loss = sum(step_loss)
             step_time += (time.time() - start_time) / FLAGS.steps_per_checkpoint
             loss += step_loss / FLAGS.steps_per_checkpoint
             current_step += 1
@@ -176,19 +171,20 @@ def train():
             if current_step % FLAGS.steps_per_checkpoint == 0:
                 # Print statistics for the previous epoch.
                 log_file.write("global step %d learning rate %.8f step-time %.4f loss "
-                       "%.4f" % (model.global_step.eval(), model.learning_rate.eval(),
-                                 step_time, loss) + '\n')
+                    % (model.global_step.eval(), model.learning_rate.eval(), step_time))
+                log_file.write(' '.join(["%.4f"%item for item in list(loss)]) + '\n')
                 # Run evals on development set and print their perplexity.
                 eval_losses = []
                 input_feed = {dataset.handle:dataset.handles['valid']}
                 output_feed = model.loss_list
                 try:
                     while True:
-                        eval_losses.append(sum(model.step(sess, input_feed, output_feed, training=False)))
+                        eval_losses.append(model.step(sess, input_feed, output_feed, training=False))
                 except:
                     dataset.reset(sess, 'valid')
                 eval_loss = sum(eval_losses) / len(eval_losses)
-                log_file.write("  eval loss %.4f" % eval_loss + '\n')
+                log_file.write("  eval loss " + ' '.join(["%.4f"%item for item in list(eval_loss)]) + '\n')
+                eval_loss = np.sum(eval_loss)
                 previous_losses.append(eval_loss)
                 sys.stdout.flush()
                 # Save checkpoint and zero timer and loss.
@@ -219,12 +215,10 @@ def sample():
         FLAGS.vocab_size = vocab.size()
         if FLAGS.embedding_files != "":
             FLAGS.vocab_dim = vocab.embedding_init.shape[1]
-        posseg_vocab = data_utils.Vocab(
-            os.path.join(data_utils.__location__, 'pos_vocab'))
 
         # Create model.
         with tf.device('/gpu:{0}'.format(FLAGS.gpu_id)):
-            seqs_placeholder, model = create_infer_graph(sess, vocab, posseg_vocab)
+            seqs_placeholder, model = create_infer_graph(sess, vocab)
 
         sys.stdout.write("> ")
         sys.stdout.flush()
@@ -260,12 +254,10 @@ def posseg():
         FLAGS.vocab_size = vocab.size()
         if FLAGS.embedding_files != "":
             FLAGS.vocab_dim = vocab.embedding_init.shape[1]
-        posseg_vocab = data_utils.Vocab(
-            os.path.join(data_utils.__location__, 'pos_vocab'))
 
         # Create model.
         with tf.device('/gpu:{0}'.format(FLAGS.gpu_id)):
-            seqs_placeholder, model = create_infer_graph(sess, vocab, posseg_vocab)
+            seqs_placeholder, model = create_infer_graph(sess, vocab)
 
         sample_len = 20
         sys.stdout.write("> ")
@@ -309,12 +301,10 @@ def test():
         FLAGS.vocab_size = vocab.size()
         if FLAGS.embedding_files != "":
             FLAGS.vocab_dim = vocab.embedding_init.shape[1]
-        posseg_vocab = data_utils.Vocab(
-            os.path.join(data_utils.__location__, 'pos_vocab'))
 
         # Create model.
         with tf.device('/gpu:{0}'.format(FLAGS.gpu_id)):
-            dataset, model = create_train_graph(sess, vocab, posseg_vocab)
+            dataset, model = create_train_graph(sess, vocab)
 
         sys.stdout.write("> ")
         sys.stdout.flush()
