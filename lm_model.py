@@ -75,7 +75,7 @@ class LM_Model(object):
         if segs == None:
             segs = [None] * len(seqs)
         self.pieces = zip(seqs, segs)
-        self.word_ids_array = word_ids_array
+        self.word_ids_array = tf.constant(word_ids_array, dtype=tf.int32)
         self.word_count_array = word_count_array
         self.vocab_size = vocab_size
         self.vocab_dim = vocab_dim
@@ -1064,7 +1064,7 @@ class LM_Model(object):
                     # get the encodes
                     word_masks_gold = tf.concat(word_masks_gold_list, axis=1)
                     pick_masks_gold = tf.concat(pick_masks_gold_list, axis=1)
-                    num_extra = 1
+                    num_extra = 5
                     field_embeds_gold = tf.concat(
                         [tf.tile(tf.nn.embedding_lookup(task_embedding, [range(num_extra)]), [batch_size,1,1])] + \
                             field_embeds_gold_list,
@@ -1073,9 +1073,9 @@ class LM_Model(object):
                     masked_word_embeds_gold = word_embeds_gold * \
                         tf.to_float(tf.expand_dims(
                             tf.logical_not(tf.pad(pick_masks_gold, [[0,0],[num_extra,0]])), axis=-1))
-                    attn_masks = tf.pad(word_masks_gold, [[0,0],[num_extra,0]], constant_values=False)
+                    attn_masks = tf.pad(word_masks_gold, [[0,0],[num_extra,0]], constant_values=True)
                     masked_attn_masks = tf.logical_and(word_masks_gold, tf.logical_not(pick_masks_gold))
-                    masked_attn_masks = tf.pad(masked_attn_masks, [[0,0],[num_extra,0]], constant_values=False)
+                    masked_attn_masks = tf.pad(masked_attn_masks, [[0,0],[num_extra,0]], constant_values=True)
                     encodes_gold = encode_words(
                         field_embeds_gold, word_embeds_gold, attn_masks)
                     masked_encodes_gold = encode_words(
@@ -1091,40 +1091,51 @@ class LM_Model(object):
                         zip(segmented_seqs_gold_list, word_embeds_gold_list, masked_encodes_gold_list[1:],
                             word_masks_gold_list, pick_masks_gold_list):
 
+                        valid_segmented_seqs_gold = tf.boolean_mask(segmented_seqs_gold, word_masks_gold)
                         valid_word_embeds_gold = tf.boolean_mask(word_embeds_gold, word_masks_gold)
-                        pick_word_embeds_gold = tf.boolean_mask(word_embeds_gold, pick_masks_gold)
-                        remain_word_embeds_gold = tf.boolean_mask(
-                            word_embeds_gold,
-                            tf.logical_and(word_masks_gold, tf.logical_not(pick_masks_gold)))
                         pick_word_encodes_gold = tf.boolean_mask(masked_word_encodes_gold, pick_masks_gold)
                         pick_segmented_seqs_gold = tf.boolean_mask(segmented_seqs_gold, pick_masks_gold)
-                        num_pick_words = tf.shape(pick_word_embeds_gold)[0]
+                        num_pick_words = tf.shape(pick_word_encodes_gold)[0]
 
-                        neg_idxs1 = tf.random_uniform(
-                            [num_pick_words, num_pick_words*2],
-                            maxval=tf.shape(remain_word_embeds_gold)[0],
-                            dtype=tf.int32)
-                        neg_word_embeds_gold1 = tf.gather(remain_word_embeds_gold, neg_idxs1)
-                        cand_word_embeds_gold1 = tf.concat(
-                            [tf.expand_dims(pick_word_embeds_gold, axis=1), neg_word_embeds_gold1], axis=1)
+                        unique_segmented_seqs_gold, unique_idxs = model_utils.unique_2d(valid_segmented_seqs_gold)
+                        unique_word_embeds_gold = tf.gather(valid_word_embeds_gold, unique_idxs)
+
+                        match_matrix = tf.equal(
+                            tf.expand_dims(pick_segmented_seqs_gold, 1),
+                            tf.expand_dims(unique_segmented_seqs_gold, 0))
+                        match_matrix = tf.reduce_all(match_matrix, axis=-1)
+                        match_idxs = tf.argmax(tf.to_int32(match_matrix), axis=-1)
+
+                        cand_idxs = tf.random.multinomial(
+                            tf.expand_dims(tf.log(self.word_count_array), 0),
+                            512,
+                            output_dtype=tf.int32)
+                        cand_idxs, _ = tf.unique(tf.squeeze(cand_idxs, axis=0))
+                        cand_word_ids = tf.gather(self.word_ids_array, cand_idxs)
+
+                        word_len1 = tf.shape(segmented_seqs_gold)[-1]
+                        word_len2 = tf.shape(self.word_ids_array)[-1]
+                        max_word_len = tf.maximum(word_len1, word_len2)
+                        unique_segmented_seqs_gold = tf.pad(
+                            unique_segmented_seqs_gold, [[0,0],[0,max_word_len-word_len1]])
+                        cand_word_ids = tf.pad(
+                            cand_word_ids, [[0,0],[0,max_word_len-word_len2]])
+
+                        match_matrix = tf.equal(
+                            tf.expand_dims(cand_word_ids, 1),
+                            tf.expand_dims(unique_segmented_seqs_gold, 0))
+                        match_matrix = tf.reduce_all(match_matrix, axis=-1)
+                        extra_mask = tf.logical_not(tf.reduce_any(match_matrix, axis=-1))
+                        extra_word_ids = tf.boolean_mask(cand_word_ids, extra_mask)[:,:word_len2]
+                        extra_word_embeds_gold = tf.squeeze(
+                            embed_words_fn(tf.expand_dims(extra_word_ids, 1), reuse=True)[0], axis=1)
+                        unique_word_embeds_gold = tf.concat(
+                            [unique_word_embeds_gold, extra_word_embeds_gold], axis=0)
+
                         word_select_logits_gold = match_embeds(
-                            pick_word_encodes_gold, cand_word_embeds_gold1, reuse=reuse)
-                        try:
-                            neg_idxs2 = tf.random.multinomial(
-                                tf.log(self.word_count_array),
-                                2048,
-                                output_dtype=tf.int32)
-                            neg_idx2, _ = tf.unique(neg_idx2)
-                            neg_word_ids2 = tf.gather(self.word_ids_array, neg_idxs2)
-                            neg_word_embeds_gold2 = embed_words_fn(neg_word_ids2, reuse=True)[0]
-                            word_select_logits_gold = tf.concat(
-                                [word_select_logits_gold,
-                                 match_embeds(pick_word_encodes_gold, neg_word_embeds_gold2, reuse=True)],
-                                axis=1)
-                        except:
-                            pass
+                            pick_word_encodes_gold, unique_word_embeds_gold, reuse=reuse)
                         word_select_loss_gold = tf.nn.sparse_softmax_cross_entropy_with_logits(
-                            labels=tf.zeros([num_pick_words], dtype=tf.int32), logits=word_select_logits_gold)
+                            labels=match_idxs, logits=word_select_logits_gold)
                         word_select_loss_gold = tf.reduce_mean(word_select_loss_gold)
                         word_select_loss_gold_list.append(word_select_loss_gold)
 
@@ -1137,7 +1148,7 @@ class LM_Model(object):
                         reuse = True
 
                     # get the sentence level loss
-                    sent_encodes_gold = tf.reduce_mean(masked_encodes_gold_list[0], axis=1)
+                    sent_encodes_gold = tf.reshape(masked_encodes_gold_list[0], [batch_size*num_extra, self.size])
                     word_embeds_gold = tf.concat(word_embeds_gold_list, axis=1)
                     word_masks_gold = tf.concat(word_masks_gold_list, axis=1)
                     weights = tf.to_float(word_masks_gold)
@@ -1150,11 +1161,14 @@ class LM_Model(object):
                     select_embeds = tf.reduce_sum(word_embeds_gold * tf.expand_dims(select_oneHot, axis=-1), axis=1)
                     discriminate_logits = match_embeds(
                         sent_encodes_gold, select_embeds, reuse=True)
+                    discriminate_logits = tf.reshape(discriminate_logits, [batch_size, num_extra, batch_size])
+                    discriminate_logits = tf.reduce_sum(discriminate_logits, axis=1)
                     sent_loss_gold = tf.nn.sparse_softmax_cross_entropy_with_logits(
                         labels=tf.range(batch_size, dtype=tf.int32), logits=discriminate_logits)
                     sent_loss_gold = tf.reduce_mean(sent_loss_gold)
 
-                    loss_list = word_embed_loss_gold_list + word_select_loss_gold_list + word_gen_loss_gold_list
+                    loss_list = word_embed_loss_gold_list + word_select_loss_gold_list + word_gen_loss_gold_list + \
+                                [sent_loss_gold]
                     loss_list = tf.stack(loss_list, axis=0)
                     return loss_list, encodes_gold_list, \
                            segmented_seqs_gold_list, word_masks_gold_list, word_ids_gold_list
