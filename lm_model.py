@@ -703,6 +703,39 @@ class LM_Model(object):
                     outputs /= tf.sqrt(float(dim))
                 return outputs
 
+            def match_embeds2(encodes, token_embeds, task_proj_embeds, reuse=None):
+                """
+                outputs the degree of matchness of the word embeds and contexts
+                encodes: batch_size x dim
+                token_embeds: batch_size x num_candidates x dim or num_candidates x dim
+                task_embeds: dim
+                """
+
+                with tf.variable_scope("matcher", reuse=reuse):
+                    dim = encodes.get_shape()[-1].value
+                    encodes = model_utils.fully_connected(
+                        encodes,
+                        dim,
+                        dropout=1.0-self.dropout,
+                        is_training=self.training,
+                        scope="enc_projs")
+                    token_embeds = model_utils.fully_connected(
+                        token_embeds,
+                        dim,
+                        dropout=1.0-self.dropout,
+                        is_training=self.training,
+                        scope="tok_projs")
+
+                    if len(token_embeds.get_shape()) == 2:
+                        outputs = tf.matmul(
+                            encodes, token_embeds, transpose_b=True)
+                    else:
+                        outputs = tf.matmul(
+                            token_embeds, tf.expand_dims(encodes, axis=-1))
+                        outputs = tf.squeeze(outputs, axis=-1)
+                    outputs /= tf.sqrt(float(dim))
+                return outputs
+
             def train_generator(encodes, encMasks, targetSeqs, reuse=None):
                 """
                 encodes: batch_size x enc_seq_length x dim
@@ -795,7 +828,7 @@ class LM_Model(object):
                 posit_embeds = model_utils.embed_position(
                     posit_ids,
                     self.size)
-                field_embeds = field_embedding[field_id] + posit_embeds
+                field_embeds = self.field_embedding[field_id] + posit_embeds
                 field_embeds = tf.concat([field_embeds, input_embeds], axis=1)
                 word_embeds = tf.zeros([batch_size, 0, self.size])
                 word_list = []
@@ -811,6 +844,7 @@ class LM_Model(object):
                     word = tf.squeeze(word, axis=1)
                     word_list.append(word)
                     reuse = True
+                candidates = tf.concat(word_list, axis=-1)
                 return candidates
 
             """ lm model """
@@ -886,6 +920,15 @@ class LM_Model(object):
                         trainable=trainable,
                         collections=collections)
                     self.task_embedding = task_embedding
+
+                    task_proj_embedding = tf.get_variable(
+                        "task_proj_embedding",
+                        shape=[10, self.size],
+                        dtype=tf.float32,
+                        initializer=tf.initializers.truncated_normal(0.0, 0.01),
+                        trainable=trainable,
+                        collections=collections)
+                    self.task_proj_embedding = task_proj_embedding
 
                 num_sample = 1
                 seg_loss_gold_list, seg_loss_hyp_list, segmented_seqs_gold_list, segmented_seqs_hyp_list, \
@@ -1170,13 +1213,16 @@ class LM_Model(object):
                     loss_list = word_embed_loss_gold_list + word_select_loss_gold_list + word_gen_loss_gold_list + \
                                 [sent_loss_gold]
                     loss_list = tf.stack(loss_list, axis=0)
+
+                    sample_seqs = sample_field(tf.tile(tf.nn.embedding_lookup(task_embedding, [range(num_extra)]), [batch_size,1,1]), tf.ones([batch_size, num_extra], dtype=tf.bool), reuse=True)
+
                     return loss_list, encodes_gold_list, \
-                           segmented_seqs_gold_list, word_masks_gold_list, word_ids_gold_list
+                           segmented_seqs_gold_list, word_masks_gold_list, word_ids_gold_list, sample_seqs
 
 
             self.model = eval(model)
 
-            self.loss_list, self.encodes_list, self.segmented_seqs_list, self.masks_list, self.word_ids_list = \
+            self.loss_list, self.encodes_list, self.segmented_seqs_list, self.masks_list, self.word_ids_list, self.sample_seqs = \
                 self.model(self.pieces)
             if trainable:
                 self.optimizer = tf.train.AdamOptimizer(

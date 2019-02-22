@@ -56,7 +56,7 @@ tf.app.flags.DEFINE_integer("vocab_size", 10000, "vocabulary size.")
 tf.app.flags.DEFINE_integer("vocab_dim", 300, "Size of embedding.")
 tf.app.flags.DEFINE_string("block_type", "transformer2", "Block type: lstm|transformer")
 tf.app.flags.DEFINE_string("decoder_type", "attn", "Decoder type: lstm|attn")
-tf.app.flags.DEFINE_string("loss_type", "unsup", "Loss type: sup|unsup")
+tf.app.flags.DEFINE_string("loss_type", "sup", "Loss type: sup|unsup")
 tf.app.flags.DEFINE_string("model", "ultra_lm", "Model: simple_lm|ultra_lm")
 tf.app.flags.DEFINE_boolean("early_stop", True, "Set True to turn on early stop.")
 tf.app.flags.DEFINE_boolean("segmented", False, "Set True to read segmented text data.")
@@ -215,10 +215,13 @@ def sample():
         FLAGS.vocab_size = vocab.size()
         if FLAGS.embedding_files != "":
             FLAGS.vocab_dim = vocab.embedding_init.shape[1]
+        word_vocab = data_utils.Vocab(
+            os.path.join(FLAGS.data_dir, "word_vocab"))
 
         # Create model.
+        seqs, segs = tf.placeholder(tf.int32, shape=[None, None]), tf.placeholder(tf.float32, shape=[None, None])
         with tf.device('/gpu:{0}'.format(FLAGS.gpu_id)):
-            seqs_placeholder, model = create_infer_graph(sess, vocab)
+            model = create_model(sess, seqs, segs, vocab, word_vocab, True)
 
         sys.stdout.write("> ")
         sys.stdout.flush()
@@ -226,11 +229,9 @@ def sample():
         text = ''
         while sentence:
             sentence = sentence.strip()
-            if sentence == '':
-                sentence = ''.join(text.split())
             sentence = data_utils.normalize(sentence)
             sample_seqs = vocab.sentence_to_token_ids(sentence)
-            sample_seqs = np.array([sample_seqs+[0]])
+            sample_seqs = np.array([sample_seqs+[-1]])
             # This is the training loop.
             input_feed = {seqs_placeholder.name: sample_seqs}
             output_feed = [model.encodes, model.sample_seqs]

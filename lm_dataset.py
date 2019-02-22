@@ -118,11 +118,11 @@ class LM_Dataset(object):
                     num_parallel_calls=64)
             dataset = dataset.filter(
                 lambda seqs, segs: tf.greater(tf.shape(seqs)[0],0))
-            dataset = dataset.map(__sample_from_long, num_parallel_calls=64)
             dataset = dataset.prefetch(buffer_size=10000)
             if mode == "repeat":
                 dataset = dataset.repeat()
                 dataset = dataset.shuffle(buffer_size=50000)
+            dataset = dataset.map(__sample_from_long, num_parallel_calls=64)
             dataset = dataset.padded_batch(batch_size, padded_shapes=([None], [None]))
             dataset = dataset.prefetch(buffer_size=100)
             iterator = dataset.make_initializable_iterator()
