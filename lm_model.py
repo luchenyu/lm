@@ -1214,10 +1214,10 @@ class LM_Model(object):
                                 [sent_loss_gold]
                     loss_list = tf.stack(loss_list, axis=0)
 
-                    sample_seqs = sample_field(tf.tile(tf.nn.embedding_lookup(task_embedding, [range(num_extra)]), [batch_size,1,1]), tf.ones([batch_size, num_extra], dtype=tf.bool), reuse=True)
+                    #sample_seqs = sample_field(tf.tile(tf.nn.embedding_lookup(task_embedding, [range(num_extra)]), [batch_size,1,1]), tf.ones([batch_size, num_extra], dtype=tf.bool), reuse=True)
 
                     return loss_list, encodes_gold_list, \
-                           segmented_seqs_gold_list, word_masks_gold_list, word_ids_gold_list, sample_seqs
+                           segmented_seqs_gold_list, word_masks_gold_list, word_ids_gold_list, seqs
 
 
             self.model = eval(model)

@@ -45,7 +45,10 @@ import tensorflow as tf
 from utils import data_utils
 import lm_dataset, lm_model
 
-tf.app.flags.DEFINE_float("learning_rate", -1, "Learning rate.")
+from os.path import expanduser
+HOME = expanduser("~")
+
+tf.app.flags.DEFINE_float("learning_rate", 1e-4, "Learning rate.")
 tf.app.flags.DEFINE_integer("clr_period", -1, "Period of cyclic learning rate.")
 tf.app.flags.DEFINE_integer("batch_size", 64, "Batch size to use during training.")
 tf.app.flags.DEFINE_integer("max_length", 150, "Max length allowed for samples.")
@@ -60,9 +63,11 @@ tf.app.flags.DEFINE_string("loss_type", "sup", "Loss type: sup|unsup")
 tf.app.flags.DEFINE_string("model", "ultra_lm", "Model: simple_lm|ultra_lm")
 tf.app.flags.DEFINE_boolean("early_stop", True, "Set True to turn on early stop.")
 tf.app.flags.DEFINE_boolean("segmented", False, "Set True to read segmented text data.")
-tf.app.flags.DEFINE_string("data_dir", "./text_corpus", "Data directory")
+tf.app.flags.DEFINE_string("data_dir", HOME+"/Data/text_zh", "Data directory")
 tf.app.flags.DEFINE_string("train_dir", "./model", "Training directory.")
-tf.app.flags.DEFINE_string("embedding_files", "./embeddings/zh_char_300_nlpcc.txt", "Pretrained embedding files.")
+tf.app.flags.DEFINE_string("vocab_file", HOME+"/Data/Vocab/vocab_zh", "character vocabulary file.")
+tf.app.flags.DEFINE_string("word_vocab_file", HOME+"/Data/Vocab/word_vocab_zh", "word vocabulary file.")
+tf.app.flags.DEFINE_string("embedding_files", HOME+"/Data/Vocab/zh_char_300_nlpcc.txt", "Pretrained embedding files.")
 tf.app.flags.DEFINE_integer("steps_per_checkpoint", 20000,
                             "How many training steps to do per checkpoint.")
 tf.app.flags.DEFINE_integer("steps_limit", 100000000,
@@ -134,13 +139,13 @@ def train():
     with tf.Session(config=tf.ConfigProto(allow_soft_placement=True)) as sess:
         # Read data into buckets and compute their sizes.
         vocab = data_utils.Vocab(
-            os.path.join(FLAGS.data_dir, "vocab"),
+            FLAGS.vocab_file,
             embedding_files=FLAGS.embedding_files)
         FLAGS.vocab_size = vocab.size()
         if FLAGS.embedding_files != "":
             FLAGS.vocab_dim = vocab.embedding_init.shape[1]
         word_vocab = data_utils.Vocab(
-            os.path.join(FLAGS.data_dir, "word_vocab"))
+            FLAGS.word_vocab_file)
 
         # Create model.
         dataset = create_dataset(sess, vocab)
@@ -210,13 +215,13 @@ def sample():
     with tf.Session(config=tf.ConfigProto(allow_soft_placement=True)) as sess:
         # Read data into buckets and compute their sizes.
         vocab = data_utils.Vocab(
-            os.path.join(FLAGS.data_dir, "vocab"),
+            FLAGS.vocab_file,
             embedding_files=FLAGS.embedding_files)
         FLAGS.vocab_size = vocab.size()
         if FLAGS.embedding_files != "":
             FLAGS.vocab_dim = vocab.embedding_init.shape[1]
         word_vocab = data_utils.Vocab(
-            os.path.join(FLAGS.data_dir, "word_vocab"))
+            FLAGS.word_vocab_file)
 
         # Create model.
         seqs, segs = tf.placeholder(tf.int32, shape=[None, None]), tf.placeholder(tf.float32, shape=[None, None])
@@ -250,11 +255,13 @@ def posseg():
     with tf.Session(config=tf.ConfigProto(allow_soft_placement=True)) as sess:
         # Read data into buckets and compute their sizes.
         vocab = data_utils.Vocab(
-            os.path.join(FLAGS.data_dir, "vocab"),
+            FLAGS.vocab_file,
             embedding_files=FLAGS.embedding_files)
         FLAGS.vocab_size = vocab.size()
         if FLAGS.embedding_files != "":
             FLAGS.vocab_dim = vocab.embedding_init.shape[1]
+        word_vocab = data_utils.Vocab(
+            FLAGS.word_vocab_file)
 
         # Create model.
         with tf.device('/gpu:{0}'.format(FLAGS.gpu_id)):
@@ -297,11 +304,13 @@ def test():
     with tf.Session(config=tf.ConfigProto(allow_soft_placement=True)) as sess:
         # Read data into buckets and compute their sizes.
         vocab = data_utils.Vocab(
-            os.path.join(FLAGS.data_dir, "vocab"),
+            FLAGS.vocab_file,
             embedding_files=FLAGS.embedding_files)
         FLAGS.vocab_size = vocab.size()
         if FLAGS.embedding_files != "":
             FLAGS.vocab_dim = vocab.embedding_init.shape[1]
+        word_vocab = data_utils.Vocab(
+            FLAGS.word_vocab_file)
 
         # Create model.
         with tf.device('/gpu:{0}'.format(FLAGS.gpu_id)):
