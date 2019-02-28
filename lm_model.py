@@ -1210,8 +1210,7 @@ class LM_Model(object):
                         labels=tf.range(batch_size, dtype=tf.int32), logits=discriminate_logits)
                     sent_loss_gold = tf.reduce_mean(sent_loss_gold)
 
-                    loss_list = word_embed_loss_gold_list + word_select_loss_gold_list + word_gen_loss_gold_list + \
-                                [sent_loss_gold]
+                    loss_list = word_embed_loss_gold_list + word_select_loss_gold_list + word_gen_loss_gold_list
                     loss_list = tf.stack(loss_list, axis=0)
 
                     #sample_seqs = sample_field(tf.tile(tf.nn.embedding_lookup(task_embedding, [range(num_extra)]), [batch_size,1,1]), tf.ones([batch_size, num_extra], dtype=tf.bool), reuse=True)

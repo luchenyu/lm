@@ -41,7 +41,7 @@ class LM_Dataset(object):
                  vocab,
                  batch_size,
                  data_paths,
-                 max_len=150,
+                 max_len=256,
                  segmented=False):
         """Create the dataset.
 
@@ -51,19 +51,19 @@ class LM_Dataset(object):
 
         def __sentence_to_token_ids(text):
             text = text.strip()
-            text = data_utils.normalize(text)
-            seqAll, segAll = [], []
-            for sent in text.split('\t'):
-                words = sent.split(' ')
-                seq, seg = data_utils.words_to_token_ids(words, vocab)
-                if len(seq) > 0:
-                    seqAll.extend(seq+[-1])
-                    segAll.extend(seg)
-            if len(segAll) > 0:
-                segAll.append(1.0)
-            seqAll = np.array(seqAll, dtype=np.int32)
-            segAll = np.array(segAll, dtype=np.float32)
-            return seqAll, segAll
+            paras = text.split('\t')
+            paras = [p.split(' ')+['\t'] for p in paras]
+            words = [w for p in paras for w in p]
+
+            if len(words) > max_len:
+                start = random.randint(0, len(words)-max_len+1)
+                words = words[start:start+max_len]
+
+            seqs, segs = data_utils.words_to_token_ids(words, vocab)
+            seqs = np.array(seqs, dtype=np.int32)
+            segs = np.array(segs, dtype=np.float32)
+            return seqs, segs
+
         def __words_to_token_ids(text):
             text = text.strip()
             words = json.loads(text, encoding='utf-8')
@@ -80,24 +80,6 @@ class LM_Dataset(object):
             seq = np.array(seq, dtype=np.int32)
             seg = np.array(seg, dtype=np.float32)
             return seq, seg
-
-        def __sample_from_long(seqs, segs):
-            length = tf.shape(seqs)[0]
-            def shorten_fn():
-                start_idx_pool = tf.boolean_mask(
-                    tf.range(length+1-max_len),
-                    tf.reshape(tf.equal(segs[:length+1-max_len], 1.0), [-1]))
-                start_idx = tf.random.shuffle(start_idx_pool)[0]
-                end_idx_pool = tf.boolean_mask(
-                    tf.range(start_idx, start_idx+max_len),
-                    tf.reshape(tf.equal(segs[start_idx+1:start_idx+max_len+1], 1.0), [-1]))
-                end_idx = tf.reduce_max(end_idx_pool)
-                return seqs[start_idx:end_idx+1], segs[start_idx:end_idx+2]
-            seqs, segs = tf.cond(
-                tf.greater(length, max_len),
-                shorten_fn,
-                lambda: (seqs, segs))
-            return seqs, segs
 
         self.iterators = {}
         for key in data_paths:
@@ -116,13 +98,11 @@ class LM_Dataset(object):
                 dataset = dataset.map(
                     lambda text: tf.py_func(__sentence_to_token_ids, [text], [tf.int32, tf.float32]),
                     num_parallel_calls=64)
-            dataset = dataset.filter(
-                lambda seqs, segs: tf.greater(tf.shape(seqs)[0],0))
-            dataset = dataset.prefetch(buffer_size=10000)
             if mode == "repeat":
                 dataset = dataset.repeat()
                 dataset = dataset.shuffle(buffer_size=50000)
-            dataset = dataset.map(__sample_from_long, num_parallel_calls=64)
+            dataset = dataset.filter(
+                lambda seqs, segs: tf.greater(tf.shape(seqs)[0],2))
             dataset = dataset.padded_batch(batch_size, padded_shapes=([None], [None]))
             dataset = dataset.prefetch(buffer_size=100)
             iterator = dataset.make_initializable_iterator()
