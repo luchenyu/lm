@@ -51,8 +51,8 @@ class LM_Model(object):
                  loss_type="sup",
                  model="ultra_lm",
                  embedding_init=None,
-                 dropout=0.0,
-                 learning_rate=0.0001, clr_period=100000,
+                 dropout=0.0, wd=1e-7,
+                 learning_rate=1e-4, clr_period=1000000,
                  reuse=None,
                  scope="lm"):
         """Create the model.
@@ -83,6 +83,7 @@ class LM_Model(object):
         self.size = size
         self.num_layers = num_layers
         self.dropout = dropout
+        self.wd = wd
 
 
         with tf.variable_scope(scope, reuse=reuse) as self.scope:
@@ -109,12 +110,12 @@ class LM_Model(object):
 
             """ Learning rate schedule """
             ratio = 0.3
-            learning_rate = tf.get_variable(
+            max_learning_rate = tf.get_variable(
                 "learning_rate",
                 dtype=tf.float32,
                 initializer=learning_rate,
                 trainable=False)
-            self.max_learning_rate = learning_rate
+            self.max_learning_rate = max_learning_rate
             clr_period = tf.get_variable(
                 "clr_period",
                 dtype=tf.float32,
@@ -124,9 +125,14 @@ class LM_Model(object):
             x = (tf.to_float(self.global_step) % clr_period) / clr_period
             learning_rate = tf.cond(
                 tf.less(x, ratio),
-                lambda: 1e-1*learning_rate + (learning_rate - 1e-1*learning_rate)*(x/ratio),
-                lambda: learning_rate + (1e-1*learning_rate - learning_rate)*(x-ratio)/(1.0-ratio))
+                lambda: 4e-2*max_learning_rate + (max_learning_rate - 4e-2*max_learning_rate)*(x/ratio),
+                lambda: (tf.math.cos((x-ratio)/(1.0-ratio)*math.pi) + 1.0) * 0.5*max_learning_rate)
             self.learning_rate = learning_rate
+            momentum = tf.cond(
+                tf.less(x, ratio),
+                lambda: 0.95 + (0.85 - 0.95)*(x/ratio),
+                lambda: -0.05*tf.math.cos((x-ratio)/(1.0-ratio)*math.pi) + 0.9)
+            self.momentum = momentum
 
             """ lm model """
             def simple_lm(seqs, segs, pos_labels):
@@ -426,7 +432,7 @@ class LM_Model(object):
                         is_training=self.training,
                         scope="projs")
                     word_embeds += model_utils.MLP(
-                        word_embeds,
+                        tf.nn.relu(word_embeds),
                         2,
                         2*self.size,
                         self.size,
@@ -689,7 +695,6 @@ class LM_Model(object):
                     token_embeds = model_utils.fully_connected(
                         token_embeds,
                         dim,
-                        dropout=1.0-self.dropout,
                         is_training=self.training,
                         scope="tok_projs")
 
@@ -792,7 +797,6 @@ class LM_Model(object):
                     attn_cell = model_utils.AttentionCell(
                         size,
                         num_layer=2,
-                        dropout=1.0-dropout,
                         is_training=self.training)
 
                     decInputs = tf.TensorArray(tf.float32, 0,
@@ -857,7 +861,7 @@ class LM_Model(object):
                     if type(embedding_init) == np.ndarray:
                         initializer = tf.initializers.constant(embedding_init)
                     else:
-                        initializer = tf.initializers.truncated_normal(0.0, 0.01)
+                        initializer = tf.initializers.variance_scaling(mode='fan_out')
                     char_embedding = tf.get_variable(
                         "char_embedding",
                         shape=[self.vocab_size, self.vocab_dim],
@@ -881,7 +885,6 @@ class LM_Model(object):
                     spellout_embedding = model_utils.fully_connected(
                         spellin_embedding,
                         self.size,
-                        dropout=1.0-self.dropout,
                         is_training=self.training,
                         scope="spellout")
                     self.spellout_embedding = spellout_embedding
@@ -890,14 +893,14 @@ class LM_Model(object):
                         "word_embedding_key",
                         shape=[self.num_categories*self.category_size, self.size],
                         dtype=tf.float32,
-                        initializer=tf.initializers.truncated_normal(0.0, 0.01),
+                        initializer=tf.initializers.variance_scaling(mode='fan_out'),
                         trainable=trainable,
                         collections=collections)
                     word_embedding_value = tf.get_variable(
                         "word_embedding_value",
                         shape=[self.num_categories*self.category_size, self.size],
                         dtype=tf.float32,
-                        initializer=tf.initializers.truncated_normal(0.0, 0.01),
+                        initializer=tf.initializers.variance_scaling(mode='fan_out'),
                         trainable=trainable,
                         collections=collections)
                     self.word_embedding_key = word_embedding_key
@@ -907,28 +910,10 @@ class LM_Model(object):
                         "field_embedding",
                         shape=[10, self.size],
                         dtype=tf.float32,
-                        initializer=tf.initializers.truncated_normal(0.0, 0.01),
+                        initializer=tf.initializers.variance_scaling(mode='fan_out'),
                         trainable=trainable,
                         collections=collections)
                     self.field_embedding = field_embedding
-
-                    task_embedding = tf.get_variable(
-                        "task_embedding",
-                        shape=[10, self.size],
-                        dtype=tf.float32,
-                        initializer=tf.initializers.truncated_normal(0.0, 0.01),
-                        trainable=trainable,
-                        collections=collections)
-                    self.task_embedding = task_embedding
-
-                    task_proj_embedding = tf.get_variable(
-                        "task_proj_embedding",
-                        shape=[10, self.size],
-                        dtype=tf.float32,
-                        initializer=tf.initializers.truncated_normal(0.0, 0.01),
-                        trainable=trainable,
-                        collections=collections)
-                    self.task_proj_embedding = task_proj_embedding
 
                 num_sample = 1
                 seg_loss_gold_list, seg_loss_hyp_list, segmented_seqs_gold_list, segmented_seqs_hyp_list, \
@@ -1093,7 +1078,7 @@ class LM_Model(object):
                         posit_embeds = model_utils.embed_position(
                             posit_ids,
                             word_embeds_gold.get_shape()[-1].value)
-                        field_embeds = field_embedding[i] + posit_embeds
+                        field_embeds = field_embedding[i+1] + posit_embeds
                         field_embeds_gold_list.append(field_embeds)
 
                         pick_masks_gold = tf.less(tf.random_uniform([batch_size, max_length]), 0.15)
@@ -1107,27 +1092,26 @@ class LM_Model(object):
                     # get the encodes
                     word_masks_gold = tf.concat(word_masks_gold_list, axis=1)
                     pick_masks_gold = tf.concat(pick_masks_gold_list, axis=1)
-                    num_extra = 5
                     field_embeds_gold = tf.concat(
-                        [tf.tile(tf.nn.embedding_lookup(task_embedding, [range(num_extra)]), [batch_size,1,1])] + \
+                        [tf.tile(tf.nn.embedding_lookup(field_embedding, [[0,]]), [batch_size,1,1])] + \
                             field_embeds_gold_list,
                         axis=1)
-                    word_embeds_gold = tf.pad(tf.concat(word_embeds_gold_list, axis=1), [[0,0],[num_extra,0],[0,0]])
+                    word_embeds_gold = tf.pad(tf.concat(word_embeds_gold_list, axis=1), [[0,0],[1,0],[0,0]])
                     masked_word_embeds_gold = word_embeds_gold * \
                         tf.to_float(tf.expand_dims(
-                            tf.logical_not(tf.pad(pick_masks_gold, [[0,0],[num_extra,0]])), axis=-1))
-                    attn_masks = tf.pad(word_masks_gold, [[0,0],[num_extra,0]], constant_values=True)
+                            tf.logical_not(tf.pad(pick_masks_gold, [[0,0],[1,0]])), axis=-1))
+                    attn_masks = tf.pad(word_masks_gold, [[0,0],[1,0]], constant_values=True)
                     masked_attn_masks = tf.logical_and(word_masks_gold, tf.logical_not(pick_masks_gold))
-                    masked_attn_masks = tf.pad(masked_attn_masks, [[0,0],[num_extra,0]], constant_values=True)
+                    masked_attn_masks = tf.pad(masked_attn_masks, [[0,0],[1,0]], constant_values=True)
                     encodes_gold = encode_words(
                         field_embeds_gold, word_embeds_gold, attn_masks)
                     masked_encodes_gold = encode_words(
                         field_embeds_gold, masked_word_embeds_gold, masked_attn_masks, reuse=True)
 
                     # get the loss of each piece
-                    encodes_gold_list = tf.split(encodes_gold, [num_extra]+seq_length_gold_list, axis=1)
+                    encodes_gold_list = tf.split(encodes_gold, [1,]+seq_length_gold_list, axis=1)
                     masked_encodes_gold_list = tf.split(
-                        masked_encodes_gold, [num_extra]+seq_length_gold_list, axis=1)
+                        masked_encodes_gold, [1,]+seq_length_gold_list, axis=1)
                     reuse = None
                     for segmented_seqs_gold, word_embeds_gold, masked_word_encodes_gold, \
                         word_masks_gold, pick_masks_gold in \
@@ -1149,31 +1133,31 @@ class LM_Model(object):
                         match_matrix = tf.reduce_all(match_matrix, axis=-1)
                         match_idxs = tf.argmax(tf.to_int32(match_matrix), axis=-1)
 
-                        cand_idxs = tf.random.multinomial(
-                            tf.expand_dims(tf.log(self.word_count_array), 0),
-                            512,
-                            output_dtype=tf.int32)
-                        cand_idxs, _ = tf.unique(tf.squeeze(cand_idxs, axis=0))
-                        cand_word_ids = tf.gather(self.word_ids_array, cand_idxs)
+                       # cand_idxs = tf.random.multinomial(
+                       #     tf.expand_dims(tf.log(self.word_count_array), 0),
+                       #     512,
+                       #     output_dtype=tf.int32)
+                       # cand_idxs, _ = tf.unique(tf.squeeze(cand_idxs, axis=0))
+                       # cand_word_ids = tf.gather(self.word_ids_array, cand_idxs)
 
-                        word_len1 = tf.shape(segmented_seqs_gold)[-1]
-                        word_len2 = tf.shape(self.word_ids_array)[-1]
-                        max_word_len = tf.maximum(word_len1, word_len2)
-                        unique_segmented_seqs_gold = tf.pad(
-                            unique_segmented_seqs_gold, [[0,0],[0,max_word_len-word_len1]])
-                        cand_word_ids = tf.pad(
-                            cand_word_ids, [[0,0],[0,max_word_len-word_len2]])
+                       # word_len1 = tf.shape(segmented_seqs_gold)[-1]
+                       # word_len2 = tf.shape(self.word_ids_array)[-1]
+                       # max_word_len = tf.maximum(word_len1, word_len2)
+                       # unique_segmented_seqs_gold = tf.pad(
+                       #     unique_segmented_seqs_gold, [[0,0],[0,max_word_len-word_len1]])
+                       # cand_word_ids = tf.pad(
+                       #     cand_word_ids, [[0,0],[0,max_word_len-word_len2]])
 
-                        match_matrix = tf.equal(
-                            tf.expand_dims(cand_word_ids, 1),
-                            tf.expand_dims(unique_segmented_seqs_gold, 0))
-                        match_matrix = tf.reduce_all(match_matrix, axis=-1)
-                        extra_mask = tf.logical_not(tf.reduce_any(match_matrix, axis=-1))
-                        extra_word_ids = tf.boolean_mask(cand_word_ids, extra_mask)[:,:word_len2]
-                        extra_word_embeds_gold = tf.squeeze(
-                            embed_words_fn(tf.expand_dims(extra_word_ids, 1), reuse=True)[0], axis=1)
-                        unique_word_embeds_gold = tf.concat(
-                            [unique_word_embeds_gold, extra_word_embeds_gold], axis=0)
+                       # match_matrix = tf.equal(
+                       #     tf.expand_dims(cand_word_ids, 1),
+                       #     tf.expand_dims(unique_segmented_seqs_gold, 0))
+                       # match_matrix = tf.reduce_all(match_matrix, axis=-1)
+                       # extra_mask = tf.logical_not(tf.reduce_any(match_matrix, axis=-1))
+                       # extra_word_ids = tf.boolean_mask(cand_word_ids, extra_mask)[:,:word_len2]
+                       # extra_word_embeds_gold = tf.squeeze(
+                       #     embed_words_fn(tf.expand_dims(extra_word_ids, 1), reuse=True)[0], axis=1)
+                       # unique_word_embeds_gold = tf.concat(
+                       #     [unique_word_embeds_gold, extra_word_embeds_gold], axis=0)
 
                         word_select_logits_gold = match_embeds(
                             pick_word_encodes_gold, unique_word_embeds_gold, reuse=reuse)
@@ -1190,26 +1174,6 @@ class LM_Model(object):
 
                         reuse = True
 
-                    # get the sentence level loss
-                    sent_encodes_gold = tf.reshape(masked_encodes_gold_list[0], [batch_size*num_extra, self.size])
-                    word_embeds_gold = tf.concat(word_embeds_gold_list, axis=1)
-                    word_masks_gold = tf.concat(word_masks_gold_list, axis=1)
-                    weights = tf.to_float(word_masks_gold)
-                    select_probs = weights
-                    select_probs /= (tf.reduce_sum(select_probs, axis=-1, keepdims=True) + 1e-20)
-                    select_ids = tf.random.multinomial(
-                        tf.log(select_probs), 1, output_dtype=tf.int32)
-                    select_oneHot = tf.one_hot(
-                        tf.squeeze(select_ids, axis=1), tf.shape(word_embeds_gold)[1])
-                    select_embeds = tf.reduce_sum(word_embeds_gold * tf.expand_dims(select_oneHot, axis=-1), axis=1)
-                    discriminate_logits = match_embeds(
-                        sent_encodes_gold, select_embeds, reuse=True)
-                    discriminate_logits = tf.reshape(discriminate_logits, [batch_size, num_extra, batch_size])
-                    discriminate_logits = tf.reduce_sum(discriminate_logits, axis=1)
-                    sent_loss_gold = tf.nn.sparse_softmax_cross_entropy_with_logits(
-                        labels=tf.range(batch_size, dtype=tf.int32), logits=discriminate_logits)
-                    sent_loss_gold = tf.reduce_mean(sent_loss_gold)
-
                     loss_list = word_embed_loss_gold_list + word_select_loss_gold_list + word_gen_loss_gold_list
                     loss_list = tf.stack(loss_list, axis=0)
 
@@ -1223,29 +1187,34 @@ class LM_Model(object):
 
             self.loss_list, self.encodes_list, self.segmented_seqs_list, self.masks_list, self.word_ids_list, self.sample_seqs = \
                 self.model(self.pieces)
+
+        with tf.variable_scope(scope+'_optimizer', reuse=reuse) as self.optimizer_scope:
             if trainable:
                 self.optimizer = tf.train.AdamOptimizer(
-                    learning_rate=learning_rate)
+                    learning_rate=self.learning_rate,
+                    beta1=self.momentum,
+                    beta2=0.99)
                 self.update = model_utils.optimize_loss(
                     tf.reduce_sum(self.loss_list),
                     self.global_step,
                     self.optimizer,
-                    self.scope.trainable_variables(),
-                    self.scope.name)
+                    wd=self.wd,
+                    scope=self.scope.name)
 
-            total_params = 0
-            for var in tf.trainable_variables():
-                print(var)
-                try:
-                    local_params=1
-                    shape = var.get_shape()  #getting shape of a variable
-                    for i in shape:
-                        local_params *= i.value  #mutiplying dimension values
-                    total_params += local_params
-                except:
-                    continue
-            print("total number of parameters is: {}".format(total_params))
-            self.saver = tf.train.Saver()
+        total_params = 0
+        for var in tf.trainable_variables():
+            print(var)
+            try:
+                local_params=1
+                shape = var.get_shape()  #getting shape of a variable
+                for i in shape:
+                    local_params *= i.value  #mutiplying dimension values
+                total_params += local_params
+            except:
+                continue
+        print("total number of parameters is: {}".format(total_params))
+        self.saver = tf.train.Saver()
+
 
         def wrapper(func):
             def wrapped_func(*args, **kwargs):
@@ -1275,6 +1244,7 @@ class LM_Model(object):
         else:
             print("Created model with fresh parameters. ")
             session.run(tf.variables_initializer(self.scope.global_variables()))
+            session.run(tf.variables_initializer(self.optimizer_scope.global_variables()))
 
     def step(self, session, input_feed, output_feed,
              training=None, do_profiling=False):

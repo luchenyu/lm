@@ -48,7 +48,7 @@ import lm_dataset, lm_model
 from os.path import expanduser
 HOME = expanduser("~")
 
-tf.app.flags.DEFINE_float("learning_rate", 1e-4, "Learning rate.")
+tf.app.flags.DEFINE_float("learning_rate", -1, "Learning rate.")
 tf.app.flags.DEFINE_integer("clr_period", -1, "Period of cyclic learning rate.")
 tf.app.flags.DEFINE_integer("batch_size", 64, "Batch size to use during training.")
 tf.app.flags.DEFINE_integer("max_length", 128, "Max length allowed for samples.")
@@ -70,8 +70,6 @@ tf.app.flags.DEFINE_string("word_vocab_file", HOME+"/Data/Vocab/word_vocab_zh", 
 tf.app.flags.DEFINE_string("embedding_files", HOME+"/Data/Vocab/zh_char_300_nlpcc.txt", "Pretrained embedding files.")
 tf.app.flags.DEFINE_integer("steps_per_checkpoint", 20000,
                             "How many training steps to do per checkpoint.")
-tf.app.flags.DEFINE_integer("steps_limit", 100000000,
-                            "How many steps to train")
 tf.app.flags.DEFINE_integer("gpu_id", 0, "Select which gpu to use.")
 tf.app.flags.DEFINE_boolean("test", False,
                             "Run a test on the eval set.")
@@ -205,8 +203,8 @@ def train():
                     model.saver.save(sess, checkpoint_path, global_step=model.global_step)
                     eval_loss_best = eval_loss
                 step_time, loss = 0.0, 0.0
-            if model.global_step.eval() >= FLAGS.steps_limit:
-                break
+                if model.global_step.eval() >= FLAGS.clr_period:
+                    break
         log_file.close()
 
 def sample():

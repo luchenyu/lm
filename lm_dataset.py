@@ -90,6 +90,9 @@ class LM_Dataset(object):
             else:
                 filenames = [data_path]
             dataset = tf.data.TextLineDataset(filenames)
+            if mode == "repeat":
+                dataset = dataset.repeat()
+                dataset = dataset.shuffle(buffer_size=50000)
             if segmented:
                 dataset = dataset.map(
                     lambda text: tf.py_func(__words_to_token_ids, [text], [tf.int32, tf.float32]),
@@ -98,9 +101,6 @@ class LM_Dataset(object):
                 dataset = dataset.map(
                     lambda text: tf.py_func(__sentence_to_token_ids, [text], [tf.int32, tf.float32]),
                     num_parallel_calls=64)
-            if mode == "repeat":
-                dataset = dataset.repeat()
-                dataset = dataset.shuffle(buffer_size=50000)
             dataset = dataset.filter(
                 lambda seqs, segs: tf.greater(tf.shape(seqs)[0],2))
             dataset = dataset.padded_batch(batch_size, padded_shapes=([None], [None]))
