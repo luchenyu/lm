@@ -1,7 +1,126 @@
-import math, os, random
+import logging, math, os, random
 import numpy as np
 import tensorflow as tf
 from utils import data_utils_py3, model_utils_py3
+
+
+"""training hook"""
+
+class InsideHook(tf.train.SessionRunHook):
+    def __init__(
+        self,
+        fetches,
+        history):
+        tf.logging.info("Create InsideHook.")
+        self.fetches = fetches
+        self.history = history
+
+    def begin(self):
+      # You can add ops to the graph here.
+
+        print('Before starting the session.')
+
+      # 1. Create saver
+
+      #exclusions = []
+      #if self.checkpoint_exclude_scopes:
+      #  exclusions = [scope.strip()
+      #                for scope in self.checkpoint_exclude_scopes.split(',')]
+      #
+      #variables_to_restore = []
+      #for var in slim.get_model_variables(): #tf.global_variables():
+      #  excluded = False
+      #  for exclusion in exclusions:
+      #    if var.op.name.startswith(exclusion):
+      #      excluded = True
+      #      break
+      #  if not excluded:
+      #    variables_to_restore.append(var)
+      #inclusions
+      #[var for var in tf.trainable_variables() if var.op.name.startswith('InceptionResnetV1')]
+
+#       self.saver = tf.train.Saver()
+
+
+    def after_create_session(self, session, coord):
+      # When this is called, the graph is finalized and
+      # ops can no longer be added to the graph.
+
+        print('Session created.')
+
+#       tf.logging.info('Fine-tuning from %s' % self.checkpoint_path)
+#       self.saver.restore(session, os.path.expanduser(self.checkpoint_path))
+#       tf.logging.info('End fineturn from %s' % self.checkpoint_path)
+
+    def before_run(self, run_context):
+        
+        return tf.train.SessionRunArgs(self.fetches)
+
+    def after_run(self, run_context, run_values):
+
+#         print(run_values.results)
+#         if self.history != None:
+#             self.history.append(run_values.results)
+        pass
+
+    def end(self, session):
+        
+        pass
+
+class OutsideHook(tf.train.SessionRunHook):
+    def __init__(
+        self):
+        tf.logging.info("Create OutsideHook.")
+
+    def begin(self):
+      # You can add ops to the graph here.
+
+        print('Before starting the session.')
+
+      # 1. Create saver
+
+      #exclusions = []
+      #if self.checkpoint_exclude_scopes:
+      #  exclusions = [scope.strip()
+      #                for scope in self.checkpoint_exclude_scopes.split(',')]
+      #
+      #variables_to_restore = []
+      #for var in slim.get_model_variables(): #tf.global_variables():
+      #  excluded = False
+      #  for exclusion in exclusions:
+      #    if var.op.name.startswith(exclusion):
+      #      excluded = True
+      #      break
+      #  if not excluded:
+      #    variables_to_restore.append(var)
+      #inclusions
+      #[var for var in tf.trainable_variables() if var.op.name.startswith('InceptionResnetV1')]
+
+#       self.saver = tf.train.Saver()
+
+
+    def after_create_session(self, session, coord):
+      # When this is called, the graph is finalized and
+      # ops can no longer be added to the graph.
+
+        print('Session created.')
+
+#       tf.logging.info('Fine-tuning from %s' % self.checkpoint_path)
+#       self.saver.restore(session, os.path.expanduser(self.checkpoint_path))
+#       tf.logging.info('End fineturn from %s' % self.checkpoint_path)
+
+    def before_run(self, run_context):
+        
+        return None
+
+    def after_run(self, run_context, run_values):
+        
+        print(run_values.results)
+
+    def end(self, session):
+        
+        pass
+
 
 """ input_fn """
 
@@ -114,7 +233,6 @@ def training_schedule(
                 lambda: -0.05*tf.math.cos((x-pct_start)/(1.0-pct_start)*math.pi) + 0.9)
         elif schedule == 'lr_finder':
             """lr range test"""
-            num_steps = 1000
             x = (tf.cast(global_step, tf.float32) % num_steps) / num_steps
             log_lr = -7.0 + x*(1.0 - (-7.0))
             learning_rate = tf.pow(10.0, log_lr)
@@ -596,8 +714,10 @@ def lm_model_fn(
             session.run(init_op2)
 #         scaffold = tf.train.Scaffold(init_op=init_op1, init_fn=init_fn)
         scaffold = tf.train.Scaffold(init_op=init_op2)
+        fetches = {'global_step': global_step, 'learning_rate': learning_rate, 'loss': loss}
+        inside_hook = InsideHook(fetches, params.get('history'))
         return tf.estimator.EstimatorSpec(
-            mode, loss=loss, train_op=train_op, scaffold=scaffold)
+            mode, loss=loss, train_op=train_op, training_hooks=[inside_hook], scaffold=scaffold)
     elif mode == tf.estimator.ModeKeys.EVAL:
         return tf.estimator.EstimatorSpec(
             mode, loss=loss)
@@ -606,3 +726,97 @@ def lm_model_fn(
             'features': features,
         }
         return tf.estimator.EstimatorSpec(mode, predictions=predictions)
+
+
+"""high level api"""
+
+def lr_range_test(
+    lm_model_fn,
+    train_input_fn,
+    params,
+    num_steps=1000):
+    """
+    train the model and evaluate every eval_every steps
+    """
+    
+#     gpu_id = '2'
+#     session_config = tf.ConfigProto(allow_soft_placement=True, gpu_options=tf.GPUOptions(visible_device_list=gpu_id))
+#     strategy = tf.distribute.MirroredStrategy()
+    config=tf.estimator.RunConfig(
+#         train_distribute=strategy,
+#         eval_distribute=strategy,
+#         session_config=session_config,
+        save_checkpoints_steps=None,
+        save_checkpoints_secs=None,
+        log_step_count_steps=10)
+    local_params = {}
+    local_params.update(params)
+    local_params['schedule'] = 'lr_finder'
+    local_params['num_steps'] = num_steps
+    history = []
+    local_params['history'] = history
+    lm = tf.estimator.Estimator(
+        model_fn=lm_model_fn,
+        model_dir='',
+        params=local_params,
+        config=config)
+    history = lm.params['history']
+    # start lr range test
+    try:
+        lm.train(
+            input_fn=train_input_fn,
+            steps=num_steps)
+    except:
+        print(history)
+        return history
+    finally:
+        print(history)
+        return history
+
+def train_and_evaluate(
+    lm_model_fn,
+    train_input_fn,
+    eval_input_fn,
+    train_dir,
+    params,
+    eval_every=10000):
+    """
+    train the model and evaluate every eval_every steps
+    """
+    
+#     gpu_id = '2'
+#     session_config = tf.ConfigProto(allow_soft_placement=True, gpu_options=tf.GPUOptions(visible_device_list=gpu_id))
+    strategy = tf.distribute.MirroredStrategy()
+    config=tf.estimator.RunConfig(
+        train_distribute=strategy,
+        eval_distribute=strategy,
+#         session_config=session_config,
+        log_step_count_steps=1000)
+    local_params = {}
+    local_params.update(params)
+    local_params['schedule'] = '1cycle'
+    lm = tf.estimator.Estimator(
+        model_fn=lm_model_fn,
+        model_dir=train_dir,
+        params=local_params,
+        config=config)
+    
+    # get TF logger
+    log = logging.getLogger('tensorflow')
+    log.setLevel(logging.DEBUG)
+    # create formatter and add it to the handlers
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    # create file handler which logs even debug messages
+    os.makedirs(train_dir, exist_ok=True)
+    fh = logging.FileHandler(os.path.join(train_dir, 'tensorflow.log'))
+    fh.setLevel(logging.DEBUG)
+    fh.setFormatter(formatter)
+    log.addHandler(fh)
+    
+    # start train and eval loop
+    for _ in range(int(params['num_steps'] / eval_every)):
+        lm.train(
+            input_fn=train_input_fn,
+            steps=eval_every)
+        lm.evaluate(
+            input_fn=eval_input_fn)
