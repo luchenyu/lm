@@ -744,18 +744,19 @@ def train_and_evaluate(
     eval_input_fn,
     train_dir,
     params,
-    eval_every=10000):
+    eval_every=10000,
+    distributed=True):
     """
     train the model and evaluate every eval_every steps
     """
     
-#     gpu_id = '2'
-#     session_config = tf.ConfigProto(allow_soft_placement=True, gpu_options=tf.GPUOptions(visible_device_list=gpu_id))
-    strategy = tf.distribute.MirroredStrategy()
+    if distributed:
+        strategy = tf.distribute.MirroredStrategy()
+    else:
+        strategy = None
     config=tf.estimator.RunConfig(
         train_distribute=strategy,
         eval_distribute=strategy,
-#         session_config=session_config,
         log_step_count_steps=1000)
     local_params = {}
     local_params.update(params)
