@@ -10,13 +10,14 @@ from utils import data_utils_py3, model_utils_py3
 class LRFinderHook(tf.train.SessionRunHook):
     def __init__(
         self,
-        fetches):
+        fetches,
+        num_steps):
         tf.logging.info("Create InsideHook.")
         self.fetches = fetches
+        self.num_steps = num_steps
         self.learning_rates = []
         self.losses = []
-        self.loss_min = float('inf')
-        self.loss_avg = None
+        self.losses_smoothed = []
         self.fig = plt.figure()
         self.ax = self.fig.add_subplot(111)
 
@@ -68,22 +69,20 @@ class LRFinderHook(tf.train.SessionRunHook):
         loss = run_values.results['loss']
         self.learning_rates.append(learning_rate)
         self.losses.append(loss)
-        if self.loss_avg == None:
-            self.loss_avg = loss
+        self.ax.clear()
+        self.ax.semilogx(self.learning_rates, self.losses)
+        if len(self.losses_smoothed) == 0:
+            self.losses_smoothed.append(loss)
         else:
-            self.loss_avg = 0.7*self.loss_avg + 0.3*loss
-        if self.loss_avg < self.loss_min:
-            self.loss_min = self.loss_avg
-        if min(self.losses[-20:]) > self.loss_min \
-            and self.loss_avg >= max(self.losses[-20:-1]) \
-            and len(self.losses) > 20:
+            self.losses_smoothed.append(0.5*self.losses_smoothed[-1] + 0.5*loss)
+        window_size = int(0.04*self.num_steps)
+        if min(self.losses_smoothed[-window_size:]) > min(self.losses_smoothed) \
+            and self.losses_smoothed[-1] >= max(self.losses_smoothed[-window_size:-1]):
             run_context.request_stop()
 
     def end(self, session):
-        self.ax.semilogx(self.learning_rates, self.losses)
         self.fig.show()
         self.fig.canvas.draw()
-
 
 
 """ input_fn """
@@ -610,13 +609,21 @@ def lm_model_fn(
         loss_weight = 1.0 if params['data_spec'][i]['is_target'] else 0.1
 
         valid_segmented_seqs_ref = tf.boolean_mask(segmented_seqs_ref, word_masks_ref)
-        valid_word_embeds_ref = tf.boolean_mask(word_embeds_ref, word_masks_ref)
-        pick_word_encodes_ref = tf.boolean_mask(masked_word_encodes_ref, pick_masks_ref)
         pick_segmented_seqs_ref = tf.boolean_mask(segmented_seqs_ref, pick_masks_ref)
+        _, valid_word_embeds_ref = tf.dynamic_partition(
+            word_embeds_ref, tf.cast(word_masks_ref, tf.int32), 2)
+        _, pick_word_encodes_ref = tf.dynamic_partition(
+            masked_word_encodes_ref, tf.cast(pick_masks_ref, tf.int32), 2)
         num_pick_words = tf.shape(pick_word_encodes_ref)[0]
 
         unique_segmented_seqs_ref, unique_idxs = model_utils_py3.unique_2d(valid_segmented_seqs_ref)
-        unique_word_embeds_ref = tf.gather(valid_word_embeds_ref, unique_idxs)
+        # use tf.dynamic_partition to replace th.gather
+        unique_1hots = tf.reduce_sum(
+            tf.one_hot(unique_idxs, tf.shape(valid_word_embeds_ref)[0], dtype=tf.int32),
+            axis=0)
+        _, unique_word_embeds_ref = tf.dynamic_partition(
+            valid_word_embeds_ref,
+            unique_1hots, 2)
 
         match_matrix = tf.equal(
             tf.expand_dims(pick_segmented_seqs_ref, 1),
@@ -660,7 +667,7 @@ def lm_model_fn(
     if mode == tf.estimator.ModeKeys.TRAIN:
         global_step = tf.train.get_global_step()
         learning_rate, momentum = training_schedule(
-            params.get('schedule'), global_step, params.get('max_lr'), params.get('num_steps'), params.get('pct_start'))
+            params['schedule'], global_step, params.get('max_lr'), params['num_steps'], params.get('pct_start'))
         init_op1 = tf.variables_initializer(tf.global_variables())
         optimizer = tf.train.AdamOptimizer(
             learning_rate=learning_rate,
@@ -680,7 +687,7 @@ def lm_model_fn(
         scaffold = tf.train.Scaffold(init_op=init_op2)
         fetches = {'global_step': global_step, 'learning_rate': learning_rate, 'loss': loss}
         if params.get('schedule') == 'lr_finder':
-            hooks = [LRFinderHook(fetches)]
+            hooks = [LRFinderHook(fetches, params['num_steps'])]
         else:
             hooks = []
         return tf.estimator.EstimatorSpec(
