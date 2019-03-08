@@ -1,3 +1,4 @@
+import matplotlib.pyplot as plt
 import logging, math, os, random
 import numpy as np
 import tensorflow as tf
@@ -6,14 +7,19 @@ from utils import data_utils_py3, model_utils_py3
 
 """training hook"""
 
-class InsideHook(tf.train.SessionRunHook):
+class LRFinderHook(tf.train.SessionRunHook):
     def __init__(
         self,
-        fetches,
-        history):
+        fetches):
         tf.logging.info("Create InsideHook.")
         self.fetches = fetches
-        self.history = history
+        self.learning_rates = []
+        self.losses = []
+        self.loss_min = float('inf')
+        self.loss_avg = None
+        self.fig = plt.figure()
+        self.ax = self.fig.add_subplot(111)
+
 
     def begin(self):
       # You can add ops to the graph here.
@@ -57,69 +63,27 @@ class InsideHook(tf.train.SessionRunHook):
         return tf.train.SessionRunArgs(self.fetches)
 
     def after_run(self, run_context, run_values):
-
 #         print(run_values.results)
-#         if self.history != None:
-#             self.history.append(run_values.results)
-        pass
+        learning_rate = run_values.results['learning_rate']
+        loss = run_values.results['loss']
+        self.learning_rates.append(learning_rate)
+        self.losses.append(loss)
+        if self.loss_avg == None:
+            self.loss_avg = loss
+        else:
+            self.loss_avg = 0.7*self.loss_avg + 0.3*loss
+        if self.loss_avg < self.loss_min:
+            self.loss_min = self.loss_avg
+        if min(self.losses[-20:]) > self.loss_min \
+            and self.loss_avg >= max(self.losses[-20:-1]) \
+            and len(self.losses) > 20:
+            run_context.request_stop()
 
     def end(self, session):
-        
-        pass
+        self.ax.semilogx(self.learning_rates, self.losses)
+        self.fig.show()
+        self.fig.canvas.draw()
 
-class OutsideHook(tf.train.SessionRunHook):
-    def __init__(
-        self):
-        tf.logging.info("Create OutsideHook.")
-
-    def begin(self):
-      # You can add ops to the graph here.
-
-        print('Before starting the session.')
-
-      # 1. Create saver
-
-      #exclusions = []
-      #if self.checkpoint_exclude_scopes:
-      #  exclusions = [scope.strip()
-      #                for scope in self.checkpoint_exclude_scopes.split(',')]
-      #
-      #variables_to_restore = []
-      #for var in slim.get_model_variables(): #tf.global_variables():
-      #  excluded = False
-      #  for exclusion in exclusions:
-      #    if var.op.name.startswith(exclusion):
-      #      excluded = True
-      #      break
-      #  if not excluded:
-      #    variables_to_restore.append(var)
-      #inclusions
-      #[var for var in tf.trainable_variables() if var.op.name.startswith('InceptionResnetV1')]
-
-#       self.saver = tf.train.Saver()
-
-
-    def after_create_session(self, session, coord):
-      # When this is called, the graph is finalized and
-      # ops can no longer be added to the graph.
-
-        print('Session created.')
-
-#       tf.logging.info('Fine-tuning from %s' % self.checkpoint_path)
-#       self.saver.restore(session, os.path.expanduser(self.checkpoint_path))
-#       tf.logging.info('End fineturn from %s' % self.checkpoint_path)
-
-    def before_run(self, run_context):
-        
-        return None
-
-    def after_run(self, run_context, run_values):
-        
-        print(run_values.results)
-
-    def end(self, session):
-        
-        pass
 
 
 """ input_fn """
@@ -715,9 +679,12 @@ def lm_model_fn(
 #         scaffold = tf.train.Scaffold(init_op=init_op1, init_fn=init_fn)
         scaffold = tf.train.Scaffold(init_op=init_op2)
         fetches = {'global_step': global_step, 'learning_rate': learning_rate, 'loss': loss}
-        inside_hook = InsideHook(fetches, params.get('history'))
+        if params.get('schedule') == 'lr_finder':
+            hooks = [LRFinderHook(fetches)]
+        else:
+            hooks = []
         return tf.estimator.EstimatorSpec(
-            mode, loss=loss, train_op=train_op, training_hooks=[inside_hook], scaffold=scaffold)
+            mode, loss=loss, train_op=train_op, training_hooks=hooks, scaffold=scaffold)
     elif mode == tf.estimator.ModeKeys.EVAL:
         return tf.estimator.EstimatorSpec(
             mode, loss=loss)
@@ -748,30 +715,21 @@ def lr_range_test(
 #         session_config=session_config,
         save_checkpoints_steps=None,
         save_checkpoints_secs=None,
-        log_step_count_steps=10)
+        log_step_count_steps=100)
     local_params = {}
     local_params.update(params)
     local_params['schedule'] = 'lr_finder'
     local_params['num_steps'] = num_steps
-    history = []
-    local_params['history'] = history
     lm = tf.estimator.Estimator(
         model_fn=lm_model_fn,
         model_dir='',
         params=local_params,
         config=config)
-    history = lm.params['history']
+
     # start lr range test
-    try:
-        lm.train(
-            input_fn=train_input_fn,
-            steps=num_steps)
-    except:
-        print(history)
-        return history
-    finally:
-        print(history)
-        return history
+    lm.train(
+        input_fn=train_input_fn,
+        steps=num_steps)
 
 def train_and_evaluate(
     lm_model_fn,
