@@ -114,14 +114,12 @@ def get_embeddings(
 def segment_words(
     seqs,
     segs,
-    max_char_length,
     reuse=None):
     """
     segment seqs according to segs
     args:
         seqs: batch_size x seq_length
         segs: batch_size x (seq_length + 1)
-        max_char_length: maximum char length allowed
     """
     with tf.variable_scope("segmentor", reuse=reuse):
 
@@ -131,10 +129,6 @@ def segment_words(
         segmented_seqs_ref, segment_idxs_ref = model_utils_py3.slice_words(
             seqs, segs[:,1:-1], get_idxs=True)
         segmented_seqs_ref = tf.stop_gradient(segmented_seqs_ref)
-        segmented_seqs_ref = tf.cond(
-            tf.less(tf.shape(segmented_seqs_ref)[2], max_char_length),
-            lambda: segmented_seqs_ref,
-            lambda: segmented_seqs_ref[:,:,:max_char_length])
 
     return segmented_seqs_ref
 
@@ -342,7 +336,7 @@ def train_speller(
         losses = tf.nn.sparse_softmax_cross_entropy_with_logits(
             labels=targetIds,
             logits=logits) * tf.cast(decMasks, tf.float32)
-        loss = tf.reduce_sum(losses) / tf.reduce_sum(tf.cast(decMasks, tf.float32))
+        losses = tf.reduce_sum(losses, axis=1)
 
-    return loss
+    return losses
 

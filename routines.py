@@ -5,9 +5,9 @@ import tensorflow as tf
 """high level routines"""
 
 def lr_range_test(
-    lm_model_fn,
-    train_input_fn,
-    params,
+    dataset,
+    model,
+    run_config,
     num_steps=1000):
     """
     train the model and evaluate every eval_every steps
@@ -23,27 +23,25 @@ def lr_range_test(
         save_checkpoints_steps=None,
         save_checkpoints_secs=None,
         log_step_count_steps=100)
-    local_params = {}
-    local_params.update(params)
-    local_params['schedule'] = 'lr_finder'
-    local_params['num_steps'] = num_steps
+    params = {'schema': dataset.schema, 'run_config': run_config, 'schedule': 'lr_finder', 'num_steps': num_steps}
+
+    # build estimator
     lm = tf.estimator.Estimator(
-        model_fn=lm_model_fn,
+        model_fn=model.lm_model_fn,
         model_dir='',
-        params=local_params,
+        params=params,
         config=config)
 
     # start lr range test
     lm.train(
-        input_fn=train_input_fn,
+        input_fn=lambda: dataset.file_input_fn('train', run_config, tf.estimator.ModeKeys.TRAIN),
         steps=num_steps)
 
 def train_and_evaluate(
-    lm_model_fn,
-    train_input_fn,
-    eval_input_fn,
+    dataset,
+    model,
+    run_config,
     train_dir,
-    params,
     eval_every=10000,
     distributed=True):
     """
@@ -58,14 +56,15 @@ def train_and_evaluate(
         train_distribute=strategy,
         eval_distribute=strategy,
         log_step_count_steps=1000)
-    local_params = {}
-    local_params.update(params)
-    local_params['schedule'] = '1cycle'
-    local_params['distributed'] = distributed
+    params = {'schema': dataset.schema, 'run_config': run_config, 'schedule': '1cycle', 'num_steps': run_config['max_train_steps']}
+    if distributed:
+        params['distributed'] = True
+
+    # build estimator
     lm = tf.estimator.Estimator(
-        model_fn=lm_model_fn,
+        model_fn=model.lm_model_fn,
         model_dir=train_dir,
-        params=local_params,
+        params=params,
         config=config)
     
     # get TF logger
@@ -81,9 +80,9 @@ def train_and_evaluate(
     log.addHandler(fh)
     
     # start train and eval loop
-    for _ in range(int(params['num_steps'] / eval_every)):
+    for _ in range(int(run_config['max_train_steps'] / eval_every)):
         lm.train(
-            input_fn=train_input_fn,
+            input_fn=lambda: dataset.file_input_fn('train', run_config, tf.estimator.ModeKeys.TRAIN),
             steps=eval_every)
         lm.evaluate(
-            input_fn=eval_input_fn)
+            input_fn=lambda: dataset.file_input_fn('dev', run_config, tf.estimator.ModeKeys.EVAL))
