@@ -18,7 +18,7 @@ class Dataset(object):
         for piece in self.schema:
             token_vocab_file = piece.get('token_vocab_file')
             if token_vocab_file != None:
-                token_vocab = data_utils_py3.Vocab(token_vocab_file)
+                token_vocab = data_utils_py3.Vocab(os.path.join(path, token_vocab_file))
                 piece['token_vocab'] = token_vocab
                 piece['token_char_ids'] = np.array(data_utils_py3.tokens_to_char_ids(
                     [list(i) if i != '_PAD' and i != '_EOS' and i != '_UNK' else [i] for i in token_vocab.vocab_list], char_vocab))
@@ -50,7 +50,7 @@ class Dataset(object):
 
         if mode == tf.estimator.ModeKeys.TRAIN:
             dataset = dataset.repeat()
-            dataset = dataset.shuffle(buffer_size=50000)
+            dataset = dataset.shuffle(buffer_size=500000)
 
         para_delim = re.compile(r'[ \t]*\t[ \t]*')
         word_delim = re.compile(r' +')

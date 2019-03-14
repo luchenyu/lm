@@ -38,7 +38,7 @@ def training_schedule(
                 lambda: -0.05*tf.math.cos((x-pct_start)/(1.0-pct_start)*math.pi) + 0.9)
         elif schedule == 'lr_finder':
             """lr range test"""
-            x = (tf.cast(global_step, tf.float32) % num_steps) / num_steps
+            x = (tf.cast(global_step, tf.float32) % float(num_steps)) / float(num_steps)
             log_lr = -7.0 + x*(1.0 - (-7.0))
             learning_rate = tf.pow(10.0, log_lr)
             momentum = 0.9

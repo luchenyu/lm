@@ -30,7 +30,8 @@ def lr_range_test(
         model_fn=model.lm_model_fn,
         model_dir='',
         params=params,
-        config=config)
+        config=config,
+        warm_start_from=model.warm_start_from)
 
     # start lr range test
     lm.train(
@@ -41,7 +42,6 @@ def train_and_evaluate(
     dataset,
     model,
     run_config,
-    train_dir,
     eval_every=10000,
     distributed=True):
     """
@@ -54,7 +54,6 @@ def train_and_evaluate(
         strategy = None
     config=tf.estimator.RunConfig(
         train_distribute=strategy,
-        eval_distribute=strategy,
         log_step_count_steps=1000)
     params = {'schema': dataset.schema, 'run_config': run_config, 'schedule': '1cycle', 'num_steps': run_config['max_train_steps']}
     if distributed:
@@ -63,26 +62,31 @@ def train_and_evaluate(
     # build estimator
     lm = tf.estimator.Estimator(
         model_fn=model.lm_model_fn,
-        model_dir=train_dir,
+        model_dir=model.train_dir,
         params=params,
-        config=config)
-    
+        config=config,
+        warm_start_from=model.warm_start_from)
+
     # get TF logger
     log = logging.getLogger('tensorflow')
-    log.setLevel(logging.DEBUG)
+    log.setLevel(logging.INFO)
     # create formatter and add it to the handlers
     formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     # create file handler which logs even debug messages
-    os.makedirs(train_dir, exist_ok=True)
-    fh = logging.FileHandler(os.path.join(train_dir, 'tensorflow.log'))
-    fh.setLevel(logging.DEBUG)
+    fh = logging.FileHandler(os.path.join(model.train_dir, 'tensorflow.log'))
+    fh.setLevel(logging.INFO)
     fh.setFormatter(formatter)
     log.addHandler(fh)
-    
+
     # start train and eval loop
-    for _ in range(int(run_config['max_train_steps'] / eval_every)):
+    counter = model.get_global_step()
+    lm.evaluate(
+        input_fn=lambda: dataset.file_input_fn('dev', run_config, tf.estimator.ModeKeys.EVAL))
+    while counter < run_config['max_train_steps']:
+        steps = min(eval_every - (counter % eval_every), run_config['max_train_steps'] - counter)
         lm.train(
             input_fn=lambda: dataset.file_input_fn('train', run_config, tf.estimator.ModeKeys.TRAIN),
-            steps=eval_every)
+            steps=steps)
+        counter = model.get_global_step()
         lm.evaluate(
             input_fn=lambda: dataset.file_input_fn('dev', run_config, tf.estimator.ModeKeys.EVAL))
