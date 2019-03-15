@@ -70,13 +70,14 @@ def get_embeddings(
         if training:
             collections.append(tf.GraphKeys.WEIGHTS)
 
-        if type(char_vocab_emb) == np.ndarray:
+        if not char_vocab_emb is None:
+            char_vocab_emb = np.pad(np.array(char_vocab_emb), [[1,0],[0,0]], 'constant')
             char_vocab_initializer = tf.initializers.constant(char_vocab_emb)
         else:
             char_vocab_initializer = tf.initializers.variance_scaling(mode='fan_out')
         char_embedding = tf.get_variable(
             "char_embedding",
-            shape=[char_vocab_size, char_vocab_dim],
+            shape=[char_vocab_size+1, char_vocab_dim], # _pad_ in char vocab is used in speller, so one more
             dtype=tf.float32,
             initializer=char_vocab_initializer,
             trainable=training,

@@ -20,8 +20,10 @@ class Dataset(object):
             if token_vocab_file != None:
                 token_vocab = data_utils_py3.Vocab(os.path.join(path, token_vocab_file))
                 piece['token_vocab'] = token_vocab
-                piece['token_char_ids'] = np.array(data_utils_py3.tokens_to_char_ids(
-                    [list(i) if i != '_PAD' and i != '_EOS' and i != '_UNK' else [i] for i in token_vocab.vocab_list], char_vocab))
+                token_char_ids = np.array(data_utils_py3.tokens_to_char_ids(
+                    [list(i) if i != '_EOS' and i != '_UNK' else [i] for i in token_vocab.vocab_list], char_vocab))
+                token_char_ids = np.pad(token_char_ids, [[1,0],[0,0]], 'constant')
+                piece['token_char_ids'] = token_char_ids
 
     def file_input_fn(self, data_name, run_config, mode):
         """

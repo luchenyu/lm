@@ -37,7 +37,7 @@ class LRFinderHook(tf.train.SessionRunHook):
         if len(self.losses_smoothed) == 0:
             self.losses_smoothed.append(loss)
         else:
-            self.losses_smoothed.append(0.5*self.losses_smoothed[-1] + 0.5*loss)
+            self.losses_smoothed.append(0.7*self.losses_smoothed[-1] + 0.3*loss)
         self.ax.clear()
         self.ax.semilogx(self.learning_rates, self.losses_smoothed)
         window_size = int(0.1*self.num_steps)
@@ -154,9 +154,18 @@ class Model(object):
             piece['seq_length'] = max_length
 
             # embed words
-            word_embeds_ref, word_masks_ref = embed_words(
-                segmented_seqs_ref, input_embedding, model_config['layer_size'],
-                run_config.get('dropout'), training, reuse=reuse)
+            if token_char_ids is None:
+                word_embeds_ref, word_masks_ref = embed_words(
+                    segmented_seqs_ref, input_embedding, model_config['layer_size'],
+                    run_config.get('dropout'), training, reuse=reuse)
+            else:
+                candidate_word_embeds, _ = embed_words(
+                    tf.expand_dims(token_char_ids[1:], 0), input_embedding, model_config['layer_size'],
+                    run_config.get('dropout'), training, reuse=reuse)
+                candidate_word_embeds = tf.squeeze(candidate_word_embeds, [0])
+                piece['candidate_word_embeds'] = candidate_word_embeds
+                word_embeds_ref = tf.gather(tf.pad(candidate_word_embeds, [[1,0],[0,0]]), seqs)
+                word_masks_ref = tf.greater(seqs, 0)
             piece['word_embeds'] = word_embeds_ref
             piece['word_masks'] = word_masks_ref
 
@@ -219,11 +228,8 @@ class Model(object):
 
                 # word_select_loss
                 if not token_char_ids is None:
-                    candidate_word_embeds, _ = embed_words(
-                        tf.expand_dims(token_char_ids, 0), input_embedding, model_config['layer_size'],
-                        run_config.get('dropout'), training, reuse=True)
-                    candidate_word_embeds = tf.squeeze(candidate_word_embeds, [0])
-                    match_idxs = tf.boolean_mask(features[i]['seqs'], features[i]['pick_masks'])
+                    candidate_word_embeds = features[i]['candidate_word_embeds']
+                    match_idxs = tf.boolean_mask(features[i]['seqs'], features[i]['pick_masks']) - 1 # seqs is 1-based
                 else:
                     valid_segmented_seqs_ref = tf.boolean_mask(features[i]['segmented_seqs'], features[i]['word_masks'])
                     pick_segmented_seqs_ref = tf.boolean_mask(features[i]['segmented_seqs'], features[i]['pick_masks'])
