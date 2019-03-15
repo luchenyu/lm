@@ -50,7 +50,8 @@ class Dataset(object):
 
         if mode == tf.estimator.ModeKeys.TRAIN:
             dataset = dataset.repeat()
-            dataset = dataset.shuffle(buffer_size=500000)
+            shuffle_pool = max(100000, len(list(open(filenames[0], 'r'))))
+            dataset = dataset.shuffle(buffer_size=shuffle_pool)
 
         para_delim = re.compile(r'[ \t]*\t[ \t]*')
         word_delim = re.compile(r' +')

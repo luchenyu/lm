@@ -52,10 +52,15 @@ class LRFinderHook(tf.train.SessionRunHook):
 class MyAdamOptimizer(tf.train.AdamOptimizer):
     def __init__(self, learning_rate=0.001, beta1=0.9, beta1_t=None, beta2=0.999, epsilon=1e-8,
                  use_locking=False, name="Adam"):
+        """beta1 is the initial momentum, beta1_t is the dynamic momentum"""
         tf.train.AdamOptimizer.__init__(
             self, learning_rate=learning_rate, beta1=beta1, beta2=beta2, epsilon=epsilon,
             use_locking=use_locking, name=name)
-        self._beta1_t = beta1_t
+        self.beta1_t = beta1_t
+
+    def _prepare(self):
+        tf.train.AdamOptimizer._prepare(self)
+        self._beta1_t = self.beta1_t
 
 
 """ lm model """
@@ -207,7 +212,6 @@ class Model(object):
         for i in features:
 
             if training or (mode == tf.estimator.ModeKeys.EVAL and run_config['data'][i]['is_target']):
-                loss_weight = 1.0 if run_config['data'][i]['is_target'] else 0.1
 
                 _, pick_word_encodes_ref = tf.dynamic_partition(
                     features[i]['encodes'], tf.cast(features[i]['pick_masks'], tf.int32), 2)
@@ -251,7 +255,6 @@ class Model(object):
                     tf.greater(tf.size(word_select_loss_ref), 0),
                     lambda: tf.reduce_mean(word_select_loss_ref),
                     lambda: tf.zeros([]))
-                word_select_loss_ref *= loss_weight
 
                 # eval metrics
                 if mode == tf.estimator.ModeKeys.EVAL and run_config['data'][i]['is_target']:
@@ -276,7 +279,6 @@ class Model(object):
                         lambda: tf.zeros([]))
                 else:
                     word_gen_loss_ref = tf.zeros([])
-                word_gen_loss_ref *= loss_weight
 
                 reuse = True
 
@@ -287,10 +289,12 @@ class Model(object):
             features[i]['word_select_loss'] = word_select_loss_ref
             features[i]['word_gen_loss'] = word_gen_loss_ref
 
-        loss_mat = tf.stack(
-            [tf.stack([features[i]['word_select_loss'] for i in features]),
-             tf.stack([features[i]['word_gen_loss'] for i in features])], axis=-1)
-        loss = tf.reduce_sum(loss_mat)
+        loss_train = sum(
+            [features[i]['word_select_loss'] + features[i]['word_gen_loss'] if run_config['data'][i]['is_target'] else 
+             0.1*(features[i]['word_gen_loss'] + features[i]['word_gen_loss']) for i in features])
+        loss_show = sum(
+            [features[i]['word_select_loss'] + features[i]['word_gen_loss'] if run_config['data'][i]['is_target'] else 
+             0.0 for i in features])
 
         # print total num of parameters
         total_params = 0
@@ -314,20 +318,20 @@ class Model(object):
                 beta1_t=momentum,
                 beta2=0.99)
             train_op = model_utils_py3.optimize_loss(
-                loss,
+                loss_train,
                 global_step,
                 optimizer,
                 wd=run_config.get('wd'),
                 scope=None)
             hooks = []
             if params.get('schedule') == 'lr_finder':
-                fetches = {'global_step': global_step, 'learning_rate': learning_rate, 'loss': loss}
+                fetches = {'global_step': global_step, 'learning_rate': learning_rate, 'loss': loss_show}
                 hooks.append(LRFinderHook(fetches, params['num_steps']))
             return tf.estimator.EstimatorSpec(
-                mode, loss=loss, train_op=train_op, training_hooks=hooks)
+                mode, loss=loss_show, train_op=train_op, training_hooks=hooks)
         elif mode == tf.estimator.ModeKeys.EVAL:
             return tf.estimator.EstimatorSpec(
-                mode, loss=loss, eval_metric_ops=metrics)
+                mode, loss=loss_show, eval_metric_ops=metrics)
         elif mode == tf.estimator.ModeKeys.PREDICT:
             predictions = {
                 'features': features,
