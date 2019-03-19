@@ -180,7 +180,7 @@ def embed_words(
         max_char_length = tf.shape(segmented_seqs)[2]
         masks = tf.reduce_any(tf.not_equal(segmented_seqs, 0), axis=2)
 
-        char_embeds = tf.nn.embedding_lookup(input_embedding, tf.maximum(segmented_seqs, 0))
+        char_embeds = tf.nn.embedding_lookup(input_embedding, segmented_seqs)
         l1_embeds = model_utils_py3.convolution2d(
             char_embeds,
             [layer_size]*2,

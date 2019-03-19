@@ -40,7 +40,7 @@ class LRFinderHook(tf.train.SessionRunHook):
             self.losses_smoothed.append(loss)
         else:
             self.losses_smoothed.append(0.9*self.losses_smoothed[-1] + 0.1*loss)
-        window_size = int(0.15*self.num_steps)
+        window_size = int(0.05*self.num_steps)
         if (min(self.losses_smoothed[-window_size:]) > min(self.losses_smoothed) \
             and self.losses_smoothed[-1] >= max(self.losses_smoothed[-window_size:-1])) or \
             self.losses_smoothed[-1] > 2.0*max(self.losses_smoothed):
@@ -123,6 +123,8 @@ class Model(object):
 
             seqs = piece['seqs']
             segs = piece['segs']
+
+            # segment
             token_char_ids = schema[i].get('token_char_ids')
             if not token_char_ids is None:
                 token_char_ids = tf.constant(token_char_ids, tf.int32)
@@ -161,26 +163,41 @@ class Model(object):
             piece['word_embeds'] = word_embeds_ref
             piece['word_masks'] = word_masks_ref
 
-            field_embeds = field_embedding[i+1] + tf.zeros_like(word_embeds_ref)
+            # field_embeds and posit_embeds
+            field_dim = field_embedding.get_shape()[-1].value
+            field_embeds = field_embedding[i+1] + tf.zeros([batch_size, max_length, field_dim])
+            piece['field_embeds'] = field_embeds
             if schema[i]['type'] == 'sequence':
                 posit_ids = tf.tile(tf.expand_dims(tf.range(max_length), 0), [batch_size, 1])
                 posit_embeds = model_utils_py3.embed_position(
                     posit_ids,
-                    model_config['layer_size'])
-                field_embeds += posit_embeds
-            piece['field_embeds'] = field_embeds
-
-            if training:
-                pick_masks_ref = tf.less(tf.random_uniform([batch_size, max_length]), 0.2)
-                pick_masks_ref = tf.logical_and(pick_masks_ref, word_masks_ref)
-            elif run_config['data'][i]['is_target']:
-                if schema[i]['type'] == 'sequence':
-                    pick_masks_ref = tf.less(tf.random_uniform([batch_size, max_length]), 0.2)
-                    pick_masks_ref = tf.logical_and(pick_masks_ref, word_masks_ref)
-                elif schema[i]['type'] == 'class':
-                    pick_masks_ref = tf.ones([batch_size, max_length], dtype=tf.bool)
+                    field_dim)
+                piece['posit_embeds'] = posit_embeds
             else:
-                pick_masks_ref = tf.zeros([batch_size, max_length], dtype=tf.bool)
+                piece['posit_embeds'] = tf.zeros([batch_size, max_length, field_dim])
+
+            # picking tokens
+            if training:
+                if run_config['data'][i]['is_target']:
+                    if schema[i]['type'] == 'sequence':
+                        pick_prob = 0.3
+                    elif schema[i]['type'] == 'class':
+                        pick_prob = 0.8
+                else:
+                    if schema[i]['type'] == 'sequence':
+                        pick_prob = 0.1
+                    elif schema[i]['type'] == 'class':
+                        pick_prob = 0.2
+            else:
+                if run_config['data'][i]['is_target']:
+                    if schema[i]['type'] == 'sequence':
+                        pick_prob = 0.3
+                    elif schema[i]['type'] == 'class':
+                        pick_prob = 1.0
+                else:
+                    pick_prob = 0.0
+            pick_masks_ref = tf.less(tf.random_uniform([batch_size, max_length]), pick_prob)
+            pick_masks_ref = tf.logical_and(pick_masks_ref, word_masks_ref)
             piece['pick_masks'] = pick_masks_ref
 
             reuse=True
@@ -193,6 +210,7 @@ class Model(object):
             [tf.tile(tf.nn.embedding_lookup(field_embedding, [[0,]]), [tf.shape(field_embeds_ref)[0],1,1]),
             field_embeds_ref],
             axis=1)
+        posit_embeds_ref = tf.pad(tf.concat([features[i]['posit_embeds'] for i in features], axis=1), [[0,0],[1,0],[0,0]])
         word_embeds_ref = tf.pad(tf.concat([features[i]['word_embeds'] for i in features], axis=1), [[0,0],[1,0],[0,0]])
         masked_word_embeds_ref = word_embeds_ref * \
             tf.cast(tf.expand_dims(
@@ -200,7 +218,7 @@ class Model(object):
         masked_attn_masks = tf.logical_and(word_masks_ref, tf.logical_not(pick_masks_ref))
         masked_attn_masks = tf.pad(masked_attn_masks, [[0,0],[1,0]], constant_values=True)
         masked_encodes_ref = encode_words(
-            field_embeds_ref, masked_word_embeds_ref, masked_attn_masks,
+            field_embeds_ref, posit_embeds_ref, masked_word_embeds_ref, masked_attn_masks,
             model_config['num_layers'], run_config.get('dropout'), training)
 
         # get the loss of each piece
@@ -245,7 +263,7 @@ class Model(object):
                     match_matrix = tf.reduce_all(match_matrix, axis=-1)
                     match_idxs = tf.argmax(tf.cast(match_matrix, tf.int32), axis=-1, output_type=tf.int32)
                 word_select_logits_ref = match_embeds(
-                    pick_word_encodes_ref, candidate_word_embeds,
+                    pick_word_encodes_ref, candidate_word_embeds, field_embedding[i],
                     run_config.get('dropout'), training, reuse=reuse)
                 word_select_loss_ref = tf.nn.sparse_softmax_cross_entropy_with_logits(
                     labels=match_idxs, logits=word_select_logits_ref)
@@ -268,7 +286,7 @@ class Model(object):
                         tf.expand_dims(pick_word_encodes_ref, 1),
                         tf.ones([num_pick_words, 1], dtype=tf.bool),
                         pick_segmented_seqs_ref,
-                        model_config['layer_size'], spellin_embedding, spellout_embedding,
+                        spellin_embedding, spellout_embedding,
                         run_config.get('dropout'), training, reuse=reuse)
                 else:
                     word_gen_loss_ref = tf.zeros([])
