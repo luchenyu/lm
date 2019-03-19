@@ -40,10 +40,10 @@ class LRFinderHook(tf.train.SessionRunHook):
             self.losses_smoothed.append(loss)
         else:
             self.losses_smoothed.append(0.9*self.losses_smoothed[-1] + 0.1*loss)
-        window_size = int(0.05*self.num_steps)
-        if (min(self.losses_smoothed[-window_size:]) > min(self.losses_smoothed) \
-            and self.losses_smoothed[-1] >= max(self.losses_smoothed[-window_size:-1])) or \
-            self.losses_smoothed[-1] > 2.0*max(self.losses_smoothed):
+        window_size = int(0.1*self.num_steps)
+        if len(self.losses_smoothed) > window_size and \
+            (min(self.losses_smoothed[-window_size:]) > min(self.losses_smoothed) \
+            or self.losses_smoothed[-1] >= max(self.losses_smoothed[-2*window_size:-window_size])):
             run_context.request_stop()
         elif len(self.learning_rates) % int(self.num_steps / 100) == 0:
             self.ax.clear()
