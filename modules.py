@@ -315,7 +315,7 @@ def match_embeds(
             logits = tf.matmul(
                 token_embed_projs, tf.expand_dims(encode_projs, axis=-1))
             logits = tf.squeeze(logits, axis=-1)
-        logits /= tf.sqrt(float(dim))
+        logits *= tf.sqrt(1.0/float(dim))
 
     return logits
 
@@ -371,19 +371,19 @@ def train_speller(
         decLength = tf.shape(inputs)[1]
         outputs, state = attn_cell(inputs, initialState)
         state[0].mark_used()
-        logits = tf.matmul(
-            tf.reshape(outputs, [batch_size*decLength, outputs.get_shape()[-1].value]),
-            spellout_embedding,
-            transpose_b=True) / tf.sqrt(float(output_dim))
-        logits = tf.reshape(logits, [batch_size, decLength, vocab_size])
-        weights = tf.cast(decMasks, tf.float32)
-        losses = tf.nn.sparse_softmax_cross_entropy_with_logits(
-            labels=targetIds,
-            logits=logits) * weights
-        weights_sum = tf.reduce_sum(weights)
+        _, valid_outputs = tf.dynamic_partition(
+            outputs, tf.cast(decMasks, tf.int32), 2)
+        valid_targetIds = tf.boolean_mask(targetIds, decMasks)
+        valid_logits = tf.matmul(
+            valid_outputs,
+            spellout_embedding * tf.sqrt(1.0/float(output_dim)),
+            transpose_b=True)
+        valid_losses = tf.nn.sparse_softmax_cross_entropy_with_logits(
+            labels=valid_targetIds,
+            logits=valid_logits)
         loss = tf.cond(
-            tf.greater(weights_sum, 0),
-            lambda: tf.reduce_sum(losses) / weights_sum,
+            tf.greater(tf.size(valid_losses), 0),
+            lambda: tf.reduce_mean(valid_losses),
             lambda: tf.zeros([]))
 
     return loss

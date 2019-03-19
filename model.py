@@ -180,7 +180,7 @@ class Model(object):
             if training:
                 if run_config['data'][i]['is_target']:
                     if schema[i]['type'] == 'sequence':
-                        pick_prob = 0.3
+                        pick_prob = 0.2
                     elif schema[i]['type'] == 'class':
                         pick_prob = 0.8
                 else:
@@ -191,7 +191,7 @@ class Model(object):
             else:
                 if run_config['data'][i]['is_target']:
                     if schema[i]['type'] == 'sequence':
-                        pick_prob = 0.3
+                        pick_prob = 0.2
                     elif schema[i]['type'] == 'class':
                         pick_prob = 1.0
                 else:
