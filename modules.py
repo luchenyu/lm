@@ -6,6 +6,20 @@ from utils import model_utils_py3
 
 """ lm components """
 
+class MyAdamOptimizer(tf.train.AdamOptimizer):
+    def __init__(self, learning_rate=0.001, beta1=0.9, beta1_t=None, beta2=0.999, epsilon=1e-8,
+                 use_locking=False, name="Adam"):
+        """beta1 is the initial momentum, beta1_t is the dynamic momentum"""
+        tf.train.AdamOptimizer.__init__(
+            self, learning_rate=learning_rate, beta1=beta1, beta2=beta2, epsilon=epsilon,
+            use_locking=use_locking, name=name)
+        self.beta1_t = beta1_t
+
+    def _prepare(self):
+        tf.train.AdamOptimizer._prepare(self)
+        if self.beta1_t != None:
+            self._beta1_t = self.beta1_t
+
 def training_schedule(
     schedule,
     global_step,
@@ -36,17 +50,27 @@ def training_schedule(
                 tf.less(x, pct_start),
                 lambda: 0.95 + (0.85 - 0.95)*(x/pct_start),
                 lambda: -0.05*tf.math.cos((x-pct_start)/(1.0-pct_start)*math.pi) + 0.9)
+            optimizer = MyAdamOptimizer(
+                learning_rate=learning_rate,
+                beta1=0.95,
+                beta1_t=momentum,
+                beta2=0.999)
         elif schedule == 'lr_finder':
             """lr range test"""
             x = (tf.cast(global_step, tf.float32) % float(num_steps)) / float(num_steps)
             log_lr = -7.0 + x*(1.0 - (-7.0))
             learning_rate = tf.pow(10.0, log_lr)
-            momentum = 0.9
+            optimizer = MyAdamOptimizer(
+                learning_rate=learning_rate,
+                beta1=0.9,
+                beta2=0.999)
         else:
-            learning_rate = None
-            momentum = None
+            optimizer = MyAdamOptimizer(
+                learning_rate=max_lr,
+                beta1=0.9,
+                beta2=0.999)
 
-    return learning_rate, momentum
+    return optimizer
 
 def get_embeddings(
     char_vocab_size,
@@ -89,7 +113,7 @@ def get_embeddings(
             char_embedding,
             2,
             layer_size,
-            layer_size,
+            int(layer_size/2),
             is_training=training,
             scope="spellin")
         spellin_embedding = model_utils_py3.layer_norm(
@@ -97,13 +121,13 @@ def get_embeddings(
 
         spellout_embedding = model_utils_py3.fully_connected(
             spellin_embedding,
-            layer_size,
+            int(layer_size/2),
             is_training=training,
             scope="spellout")
 
         field_embedding = tf.get_variable(
             "field_embedding",
-            shape=[10, layer_size],
+            shape=[10, int(layer_size/4)],
             dtype=tf.float32,
             initializer=tf.initializers.variance_scaling(mode='fan_out'),
             trainable=training,
@@ -156,7 +180,7 @@ def embed_words(
         max_char_length = tf.shape(segmented_seqs)[2]
         masks = tf.reduce_any(tf.not_equal(segmented_seqs, 0), axis=2)
 
-        char_embeds = tf.nn.embedding_lookup(input_embedding, segmented_seqs)
+        char_embeds = tf.nn.embedding_lookup(input_embedding, tf.maximum(segmented_seqs, 0))
         l1_embeds = model_utils_py3.convolution2d(
             char_embeds,
             [layer_size]*2,
@@ -177,22 +201,26 @@ def embed_words(
              tf.reduce_max(l1_embeds, axis=2),
              tf.reduce_max(l2_embeds, axis=2)],
             axis=-1)
-        word_embeds = model_utils_py3.highway(
+        concat_embeds = model_utils_py3.highway(
             concat_embeds,
             2,
             activation_fn=tf.nn.relu,
             dropout=dropout,
             is_training=training,
             scope="highway")
-        word_embeds = model_utils_py3.layer_norm(
-            word_embeds, begin_norm_axis=-1, is_training=training)
+        concat_embeds = model_utils_py3.layer_norm(
+            concat_embeds, begin_norm_axis=-1,
+            is_training=training)
         word_embeds = model_utils_py3.fully_connected(
-            word_embeds,
+            concat_embeds,
             layer_size,
+            dropout=dropout,
             is_training=training,
             scope="projs")
+        word_embeds_normed = model_utils_py3.layer_norm(
+            word_embeds, begin_norm_axis=-1, is_training=training)
         word_embeds += model_utils_py3.MLP(
-            tf.nn.relu(word_embeds),
+            tf.concat([concat_embeds, word_embeds_normed], axis=-1),
             2,
             2*layer_size,
             layer_size,
@@ -200,7 +228,8 @@ def embed_words(
             is_training=training,
             scope="MLP")
         word_embeds = model_utils_py3.layer_norm(
-            word_embeds, begin_norm_axis=-1, is_training=training)
+            word_embeds, begin_norm_axis=-1,
+            is_training=training)
 
         masksLeft = tf.pad(masks, [[0,0],[1,0]])[:,:-1]
         masksRight = tf.pad(masks, [[0,0],[0,1]])[:,1:]
@@ -210,7 +239,8 @@ def embed_words(
 
 def encode_words(
     field_embeds,
-    value_embeds,
+    posit_embeds,
+    word_embeds,
     attn_masks,
     num_layers,
     dropout,
@@ -229,10 +259,13 @@ def encode_words(
 
     with tf.variable_scope("encoder", reuse=reuse):
 
+        layer_size = word_embeds.get_shape()[-1].value
         encodes = model_utils_py3.transformer(
             field_embeds,
+            posit_embeds,
+            word_embeds,
             num_layers,
-            values=value_embeds,
+            layer_size,
             masks=attn_masks,
             dropout=dropout,
             is_training=training,
@@ -243,6 +276,7 @@ def encode_words(
 def match_embeds(
     encodes,
     token_embeds,
+    field_embeds,
     dropout,
     training,
     reuse=None):
@@ -251,7 +285,7 @@ def match_embeds(
     args:
         encodes: batch_size x dim
         token_embeds: batch_size x num_candidates x dim or num_candidates x dim
-        task_embeds: dim
+        field_embeds: dim
         dropout: dropout ratio
         training: bool
     """
@@ -259,13 +293,16 @@ def match_embeds(
     with tf.variable_scope("matcher", reuse=reuse):
 
         dim = encodes.get_shape()[-1].value
-        encodes = model_utils_py3.fully_connected(
+        field_dim = field_embeds.get_shape()[-1].value
+        encodes = tf.concat([encodes, field_embeds+tf.zeros(tf.concat([tf.shape(encodes)[:-1],[field_dim]], axis=0))], axis=-1)
+        encode_projs = model_utils_py3.GLU(
             encodes,
             dim,
             dropout=dropout,
             is_training=training,
             scope="enc_projs")
-        token_embeds = model_utils_py3.fully_connected(
+        token_embeds = tf.concat([token_embeds, field_embeds+tf.zeros(tf.concat([tf.shape(token_embeds)[:-1],[field_dim]], axis=0))], axis=-1)
+        token_embed_projs = model_utils_py3.GLU(
             token_embeds,
             dim,
             is_training=training,
@@ -273,10 +310,10 @@ def match_embeds(
 
         if len(token_embeds.get_shape()) == 2:
             logits = tf.matmul(
-                encodes, token_embeds, transpose_b=True)
+                encode_projs, token_embed_projs, transpose_b=True)
         else:
             logits = tf.matmul(
-                token_embeds, tf.expand_dims(encodes, axis=-1))
+                token_embed_projs, tf.expand_dims(encode_projs, axis=-1))
             logits = tf.squeeze(logits, axis=-1)
         logits /= tf.sqrt(float(dim))
 
@@ -286,7 +323,6 @@ def train_speller(
     encodes,
     encMasks,
     targetSeqs,
-    layer_size,
     spellin_embedding,
     spellout_embedding,
     dropout,
@@ -307,19 +343,25 @@ def train_speller(
 
     with tf.variable_scope("speller", reuse=reuse):
 
+        batch_size = tf.shape(encodes)[0]
+        vocab_size = spellin_embedding.get_shape()[0].value
+        input_dim = spellin_embedding.get_shape()[-1].value
+        output_dim = spellout_embedding.get_shape()[-1].value
+
         attn_cell = model_utils_py3.AttentionCell(
-            layer_size,
+            output_dim,
             num_layer=2,
             dropout=dropout,
             is_training=training)
 
-        batch_size = tf.shape(encodes)[0]
-        vocab_size = spellin_embedding.get_shape()[0].value
-        dim = spellout_embedding.get_shape()[-1].value
-
         decInputs = tf.TensorArray(tf.float32, 0,
             dynamic_size=True, clear_after_read=False, infer_shape=False)
-        initialState = (decInputs, encodes, encMasks)
+        encode_projs = model_utils_py3.fully_connected(
+            encodes,
+            input_dim,
+            is_training=training,
+            scope="enc_projs")
+        initialState = (decInputs, encode_projs, encMasks)
         inputs = tf.nn.embedding_lookup(
             spellin_embedding,
             tf.pad(targetSeqs, [[0,0],[1,0]]))
@@ -332,12 +374,17 @@ def train_speller(
         logits = tf.matmul(
             tf.reshape(outputs, [batch_size*decLength, outputs.get_shape()[-1].value]),
             spellout_embedding,
-            transpose_b=True) / tf.sqrt(float(dim))
+            transpose_b=True) / tf.sqrt(float(output_dim))
         logits = tf.reshape(logits, [batch_size, decLength, vocab_size])
+        weights = tf.cast(decMasks, tf.float32)
         losses = tf.nn.sparse_softmax_cross_entropy_with_logits(
             labels=targetIds,
-            logits=logits) * tf.cast(decMasks, tf.float32)
-        losses = tf.reduce_sum(losses, axis=1)
+            logits=logits) * weights
+        weights_sum = tf.reduce_sum(weights)
+        loss = tf.cond(
+            tf.greater(weights_sum, 0),
+            lambda: tf.reduce_sum(losses) / weights_sum,
+            lambda: tf.zeros([]))
 
-    return losses
+    return loss
 

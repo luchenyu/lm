@@ -18,6 +18,7 @@ class LRFinderHook(tf.train.SessionRunHook):
         self.num_steps = num_steps
         self.learning_rates = []
         self.losses_smoothed = []
+        self.losses = []
         self.fig = plt.figure()
         self.ax = self.fig.add_subplot(111)
 
@@ -34,33 +35,24 @@ class LRFinderHook(tf.train.SessionRunHook):
         learning_rate = run_values.results['learning_rate']
         loss = run_values.results['loss']
         self.learning_rates.append(learning_rate)
+        self.losses.append(loss)
         if len(self.losses_smoothed) == 0:
             self.losses_smoothed.append(loss)
         else:
-            self.losses_smoothed.append(0.7*self.losses_smoothed[-1] + 0.3*loss)
-        self.ax.clear()
-        self.ax.semilogx(self.learning_rates, self.losses_smoothed)
-        window_size = int(0.1*self.num_steps)
-        if min(self.losses_smoothed[-window_size:]) > min(self.losses_smoothed) \
-            and self.losses_smoothed[-1] >= max(self.losses_smoothed[-window_size:-1]):
+            self.losses_smoothed.append(0.9*self.losses_smoothed[-1] + 0.1*loss)
+        window_size = int(0.15*self.num_steps)
+        if (min(self.losses_smoothed[-window_size:]) > min(self.losses_smoothed) \
+            and self.losses_smoothed[-1] >= max(self.losses_smoothed[-window_size:-1])) or \
+            self.losses_smoothed[-1] > 2.0*max(self.losses_smoothed):
             run_context.request_stop()
+        elif len(self.learning_rates) % int(self.num_steps / 100) == 0:
+            self.ax.clear()
+            self.ax.semilogx(self.learning_rates, self.losses_smoothed)
+            self.ax.semilogx(self.learning_rates, self.losses)
 
     def end(self, session):
         self.fig.show()
         self.fig.canvas.draw()
-
-class MyAdamOptimizer(tf.train.AdamOptimizer):
-    def __init__(self, learning_rate=0.001, beta1=0.9, beta1_t=None, beta2=0.999, epsilon=1e-8,
-                 use_locking=False, name="Adam"):
-        """beta1 is the initial momentum, beta1_t is the dynamic momentum"""
-        tf.train.AdamOptimizer.__init__(
-            self, learning_rate=learning_rate, beta1=beta1, beta2=beta2, epsilon=epsilon,
-            use_locking=use_locking, name=name)
-        self.beta1_t = beta1_t
-
-    def _prepare(self):
-        tf.train.AdamOptimizer._prepare(self)
-        self._beta1_t = self.beta1_t
 
 
 """ lm model """
@@ -179,11 +171,11 @@ class Model(object):
             piece['field_embeds'] = field_embeds
 
             if training:
-                pick_masks_ref = tf.less(tf.random_uniform([batch_size, max_length]), 0.15)
+                pick_masks_ref = tf.less(tf.random_uniform([batch_size, max_length]), 0.2)
                 pick_masks_ref = tf.logical_and(pick_masks_ref, word_masks_ref)
             elif run_config['data'][i]['is_target']:
                 if schema[i]['type'] == 'sequence':
-                    pick_masks_ref = tf.less(tf.random_uniform([batch_size, max_length]), 0.15)
+                    pick_masks_ref = tf.less(tf.random_uniform([batch_size, max_length]), 0.2)
                     pick_masks_ref = tf.logical_and(pick_masks_ref, word_masks_ref)
                 elif schema[i]['type'] == 'class':
                     pick_masks_ref = tf.ones([batch_size, max_length], dtype=tf.bool)
@@ -278,11 +270,6 @@ class Model(object):
                         pick_segmented_seqs_ref,
                         model_config['layer_size'], spellin_embedding, spellout_embedding,
                         run_config.get('dropout'), training, reuse=reuse)
-                    word_gen_loss_ref /= float(run_config['data'][i]['max_token_length'])
-                    word_gen_loss_ref = tf.cond(
-                        tf.greater(tf.size(word_gen_loss_ref), 0),
-                        lambda: tf.reduce_mean(word_gen_loss_ref),
-                        lambda: tf.zeros([]))
                 else:
                     word_gen_loss_ref = tf.zeros([])
 
@@ -297,7 +284,7 @@ class Model(object):
 
         loss_train = sum(
             [features[i]['word_select_loss'] + features[i]['word_gen_loss'] if run_config['data'][i]['is_target'] else 
-             0.1*(features[i]['word_gen_loss'] + features[i]['word_gen_loss']) for i in features])
+             0.1*(features[i]['word_select_loss'] + features[i]['word_gen_loss']) for i in features])
         loss_show = sum(
             [features[i]['word_select_loss'] + features[i]['word_gen_loss'] if run_config['data'][i]['is_target'] else 
              0.0 for i in features])
@@ -316,13 +303,8 @@ class Model(object):
         # return EstimatorSpec
         if mode == tf.estimator.ModeKeys.TRAIN:
             global_step = tf.train.get_global_step()
-            learning_rate, momentum = training_schedule(
+            optimizer = training_schedule(
                 params['schedule'], global_step, run_config.get('max_lr'), params['num_steps'], run_config.get('pct_start'))
-            optimizer = MyAdamOptimizer(
-                learning_rate=learning_rate,
-                beta1=0.95,
-                beta1_t=momentum,
-                beta2=0.99)
             train_op = model_utils_py3.optimize_loss(
                 loss_train,
                 global_step,
@@ -331,7 +313,7 @@ class Model(object):
                 scope=None)
             hooks = []
             if params.get('schedule') == 'lr_finder':
-                fetches = {'global_step': global_step, 'learning_rate': learning_rate, 'loss': loss_show}
+                fetches = {'global_step': global_step, 'learning_rate': optimizer._lr_t, 'loss': loss_show}
                 hooks.append(LRFinderHook(fetches, params['num_steps']))
             return tf.estimator.EstimatorSpec(
                 mode, loss=loss_show, train_op=train_op, training_hooks=hooks)
