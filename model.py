@@ -309,7 +309,7 @@ class Model(object):
 
         # print total num of parameters
         total_params = 0
-        for var in tf.trainable_variables():
+        for var in tf.global_variables():
             #print(var)
             local_params=1
             shape = var.get_shape()  #getting shape of a variable
