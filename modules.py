@@ -201,32 +201,20 @@ def embed_words(
              tf.reduce_max(l1_embeds, axis=2),
              tf.reduce_max(l2_embeds, axis=2)],
             axis=-1)
-        concat_embeds = model_utils_py3.highway(
-            concat_embeds,
-            2,
-            activation_fn=tf.nn.relu,
-            dropout=dropout,
-            is_training=training,
-            scope="highway")
-        concat_embeds = model_utils_py3.layer_norm(
-            concat_embeds, begin_norm_axis=-1,
-            is_training=training)
-        word_embeds = model_utils_py3.fully_connected(
+        word_embeds = model_utils_py3.GLU(
             concat_embeds,
             layer_size,
             dropout=dropout,
             is_training=training,
-            scope="projs")
+            scope="projs0")
         word_embeds_normed = model_utils_py3.layer_norm(
             word_embeds, begin_norm_axis=-1, is_training=training)
-        word_embeds += model_utils_py3.MLP(
+        word_embeds += model_utils_py3.GLU(
             tf.concat([concat_embeds, word_embeds_normed], axis=-1),
-            2,
-            2*layer_size,
             layer_size,
             dropout=dropout,
             is_training=training,
-            scope="MLP")
+            scope="projs1")
         word_embeds = model_utils_py3.layer_norm(
             word_embeds, begin_norm_axis=-1,
             is_training=training)
