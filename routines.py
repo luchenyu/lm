@@ -13,13 +13,7 @@ def lr_range_test(
     train the model and evaluate every eval_every steps
     """
     
-#     gpu_id = '2'
-#     session_config = tf.ConfigProto(allow_soft_placement=True, gpu_options=tf.GPUOptions(visible_device_list=gpu_id))
-#     strategy = tf.distribute.MirroredStrategy()
     config=tf.estimator.RunConfig(
-#         train_distribute=strategy,
-#         eval_distribute=strategy,
-#         session_config=session_config,
         save_checkpoints_steps=None,
         save_checkpoints_secs=None,
         log_step_count_steps=100)
@@ -80,8 +74,6 @@ def train_and_evaluate(
 
     # start train and eval loop
     counter = model.get_global_step()
-    lm.evaluate(
-        input_fn=lambda: dataset.file_input_fn('dev', run_config, tf.estimator.ModeKeys.EVAL))
     while counter < run_config['max_train_steps']:
         steps = min(eval_every - (counter % eval_every), run_config['max_train_steps'] - counter)
         lm.train(
