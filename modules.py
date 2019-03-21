@@ -204,7 +204,7 @@ def embed_words(
         word_embeds = model_utils_py3.GLU(
             concat_embeds,
             layer_size,
-            dropout=dropout,
+            dropout=0.5*dropout,
             is_training=training,
             scope="projs0")
         word_embeds_normed = model_utils_py3.layer_norm(
@@ -212,7 +212,7 @@ def embed_words(
         word_embeds += model_utils_py3.GLU(
             tf.concat([concat_embeds, word_embeds_normed], axis=-1),
             layer_size,
-            dropout=dropout,
+            dropout=0.5*dropout,
             is_training=training,
             scope="projs1")
         word_embeds = model_utils_py3.layer_norm(
