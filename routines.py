@@ -82,3 +82,27 @@ def train_and_evaluate(
         counter = model.get_global_step()
         lm.evaluate(
             input_fn=lambda: dataset.file_input_fn('dev', run_config, tf.estimator.ModeKeys.EVAL))
+
+def evaluate(
+    dataset,
+    model,
+    run_config):
+    """
+    train the model and evaluate every eval_every steps
+    """
+
+    config=tf.estimator.RunConfig(
+        log_step_count_steps=1000)
+    params = {'schema': dataset.schema, 'run_config': run_config}
+
+    # build estimator
+    lm = tf.estimator.Estimator(
+        model_fn=model.lm_model_fn,
+        model_dir=model.train_dir,
+        params=params,
+        config=config,
+        warm_start_from=model.warm_start_from)
+
+    # start train and eval loop
+    lm.evaluate(
+        input_fn=lambda: dataset.file_input_fn('eval', run_config, tf.estimator.ModeKeys.EVAL))
