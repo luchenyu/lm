@@ -252,6 +252,8 @@ def encode_words(
         num_layers: num of layers
         dropout: dropout ratio
         training: bool
+    return:
+        encodes: batch_size x (num_layers+1) x seq_length x layer_size
     """
 
     with tf.variable_scope("encoder", reuse=reuse):

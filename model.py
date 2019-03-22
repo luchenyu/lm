@@ -240,9 +240,10 @@ class Model(object):
 
         # get the loss of each piece
         masked_encodes_ref_list = tf.split(
-            masked_encodes_ref, [1,]+[features[i]['seq_length'] for i in features], axis=1)
+            masked_encodes_ref, [1,]+[features[i]['seq_length'] for i in features], axis=2)
         for i, piece in features.items():
             piece['encodes'] = masked_encodes_ref_list[i+1]
+            piece['final_encodes'] = masked_encodes_ref_list[i+1][:,-1]
         metrics = {}
         reuse = None
         for i in features:
@@ -250,7 +251,7 @@ class Model(object):
             if training or (mode == tf.estimator.ModeKeys.EVAL and run_config['data'][i]['is_target']):
 
                 _, pick_word_encodes_ref = tf.dynamic_partition(
-                    features[i]['encodes'], tf.cast(features[i]['pick_masks'], tf.int32), 2)
+                    features[i]['final_encodes'], tf.cast(features[i]['pick_masks'], tf.int32), 2)
                 token_char_ids = schema[i].get('token_char_ids')
 
                 # word_select_loss
