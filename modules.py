@@ -125,16 +125,25 @@ def get_embeddings(
             is_training=training,
             scope="spellout")
 
-        field_embedding = tf.get_variable(
-            "field_embedding",
-            shape=[10, int(layer_size/4)],
+        field_posit_embedding = tf.get_variable(
+            "field_posit_embedding",
+            shape=[64, int(layer_size/4)],
             dtype=tf.float32,
             initializer=tf.initializers.variance_scaling(mode='fan_out'),
             trainable=training,
             collections=collections,
             aggregation=tf.VariableAggregation.MEAN)
 
-    return input_embedding, spellin_embedding, spellout_embedding, field_embedding
+        field_encode_embedding = tf.get_variable(
+            "field_encode_embedding",
+            shape=[64, layer_size],
+            dtype=tf.float32,
+            initializer=tf.initializers.variance_scaling(mode='fan_out'),
+            trainable=training,
+            collections=collections,
+            aggregation=tf.VariableAggregation.MEAN)
+
+    return input_embedding, spellin_embedding, spellout_embedding, field_posit_embedding, field_encode_embedding
 
 def segment_words(
     seqs,
@@ -226,7 +235,7 @@ def embed_words(
     return word_embeds, word_masks
 
 def encode_words(
-    field_embeds,
+    field_encodes,
     posit_embeds,
     word_embeds,
     attn_masks,
@@ -249,7 +258,7 @@ def encode_words(
 
         layer_size = word_embeds.get_shape()[-1].value
         encodes = model_utils_py3.transformer(
-            field_embeds,
+            field_encodes,
             posit_embeds,
             word_embeds,
             num_layers,
@@ -264,7 +273,6 @@ def encode_words(
 def match_embeds(
     encodes,
     token_embeds,
-    field_embeds,
     dropout,
     training,
     reuse=None):
@@ -281,16 +289,13 @@ def match_embeds(
     with tf.variable_scope("matcher", reuse=reuse):
 
         dim = encodes.get_shape()[-1].value
-        field_dim = field_embeds.get_shape()[-1].value
-        encodes = tf.concat([encodes, field_embeds+tf.zeros(tf.concat([tf.shape(encodes)[:-1],[field_dim]], axis=0))], axis=-1)
         encode_projs = model_utils_py3.GLU(
             encodes,
             dim,
             dropout=dropout,
             is_training=training,
             scope="enc_projs")
-        token_embeds = tf.concat([token_embeds, field_embeds+tf.zeros(tf.concat([tf.shape(token_embeds)[:-1],[field_dim]], axis=0))], axis=-1)
-        token_embed_projs = model_utils_py3.GLU(
+        token_embed_projs = model_utils_py3.fully_connected(
             token_embeds,
             dim,
             is_training=training,

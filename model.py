@@ -114,7 +114,7 @@ class Model(object):
         run_config = params['run_config']
         model_config = self.model_config
         training = (mode == tf.estimator.ModeKeys.TRAIN)
-        input_embedding, spellin_embedding, spellout_embedding, field_embedding = get_embeddings(
+        input_embedding, spellin_embedding, spellout_embedding, field_posit_embedding, field_encode_embedding = get_embeddings(
             model_config['char_vocab_size'], model_config['char_vocab_dim'], model_config.get('char_vocab_emb'),
             model_config['layer_size'], training)
 
@@ -163,18 +163,19 @@ class Model(object):
             piece['word_embeds'] = word_embeds_ref
             piece['word_masks'] = word_masks_ref
 
-            # field_embeds and posit_embeds
-            field_dim = field_embedding.get_shape()[-1].value
-            field_embeds = field_embedding[i+1] + tf.zeros([batch_size, max_length, field_dim])
-            piece['field_embeds'] = field_embeds
+            # field_encodes and posit_embeds
+            field_encodes = field_encode_embedding[i+1] + tf.zeros([batch_size, max_length, model_config['layer_size']])
+            piece['field_encodes'] = field_encodes
+            posit_dim = field_posit_embedding.get_shape()[-1].value
             if schema[i]['type'] == 'sequence':
                 posit_ids = tf.tile(tf.expand_dims(tf.range(max_length), 0), [batch_size, 1])
                 posit_embeds = model_utils_py3.embed_position(
                     posit_ids,
-                    field_dim)
-                piece['posit_embeds'] = posit_embeds
+                    posit_dim)
             else:
-                piece['posit_embeds'] = tf.zeros([batch_size, max_length, field_dim])
+                posit_embeds = tf.zeros([batch_size, max_length, posit_dim])
+            posit_embeds += field_posit_embedding[i+1]
+            piece['posit_embeds'] = posit_embeds
 
             # picking tokens
             if training:
@@ -205,12 +206,16 @@ class Model(object):
         # get the encodes
         word_masks_ref = tf.concat([features[i]['word_masks'] for i in features], axis=1)
         pick_masks_ref = tf.concat([features[i]['pick_masks'] for i in features], axis=1)
-        field_embeds_ref = tf.concat([features[i]['field_embeds'] for i in features], axis=1)
-        field_embeds_ref = tf.concat(
-            [tf.tile(tf.nn.embedding_lookup(field_embedding, [[0,]]), [tf.shape(field_embeds_ref)[0],1,1]),
-            field_embeds_ref],
+        field_encodes_ref = tf.concat([features[i]['field_encodes'] for i in features], axis=1)
+        field_encodes_ref = tf.concat(
+            [tf.tile(tf.nn.embedding_lookup(field_encode_embedding, [[0,]]), [tf.shape(field_encodes_ref)[0],1,1]),
+            field_encodes_ref],
             axis=1)
-        posit_embeds_ref = tf.pad(tf.concat([features[i]['posit_embeds'] for i in features], axis=1), [[0,0],[1,0],[0,0]])
+        posit_embeds_ref = tf.concat([features[i]['posit_embeds'] for i in features], axis=1)
+        posit_embeds_ref = tf.concat(
+            [tf.tile(tf.nn.embedding_lookup(field_posit_embedding, [[0,]]), [tf.shape(posit_embeds_ref)[0],1,1]),
+             posit_embeds_ref],
+            axis=1)
         word_embeds_ref = tf.pad(tf.concat([features[i]['word_embeds'] for i in features], axis=1), [[0,0],[1,0],[0,0]])
         masked_word_embeds_ref = word_embeds_ref * \
             tf.cast(tf.expand_dims(
@@ -218,7 +223,7 @@ class Model(object):
         masked_attn_masks = tf.logical_and(word_masks_ref, tf.logical_not(pick_masks_ref))
         masked_attn_masks = tf.pad(masked_attn_masks, [[0,0],[1,0]], constant_values=True)
         masked_encodes_ref = encode_words(
-            field_embeds_ref, posit_embeds_ref, masked_word_embeds_ref, masked_attn_masks,
+            field_encodes_ref, posit_embeds_ref, masked_word_embeds_ref, masked_attn_masks,
             model_config['num_layers'], run_config.get('dropout'), training)
 
         # get the loss of each piece
@@ -263,7 +268,7 @@ class Model(object):
                     match_matrix = tf.reduce_all(match_matrix, axis=-1)
                     match_idxs = tf.argmax(tf.cast(match_matrix, tf.int32), axis=-1, output_type=tf.int32)
                 word_select_logits_ref = match_embeds(
-                    pick_word_encodes_ref, candidate_word_embeds, field_embedding[i],
+                    pick_word_encodes_ref, candidate_word_embeds,
                     run_config.get('dropout'), training, reuse=reuse)
                 word_select_loss_ref = tf.nn.sparse_softmax_cross_entropy_with_logits(
                     labels=match_idxs, logits=word_select_logits_ref)
