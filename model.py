@@ -66,6 +66,7 @@ class Model(object):
         self.model_config = model_config
         self.train_dir = train_dir
         self.warm_start_from = None
+        self.isFreeze = False
         if pretrain_dir != None:
             self.warm_start_from = tf.estimator.WarmStartSettings(
                         ckpt_to_initialize_from=pretrain_dir,
@@ -73,6 +74,7 @@ class Model(object):
             if os.path.exists(os.path.join(pretrain_dir, 'model_config')):
                 with open(os.path.join(pretrain_dir, 'model_config'), 'r') as json_file:
                     self.model_config = json.load(json_file)
+            self.isFreeze = True
         os.makedirs(train_dir, exist_ok=True)
         if os.path.exists(os.path.join(train_dir, 'model_config')):
             with open(os.path.join(train_dir, 'model_config'), 'r') as json_file:
@@ -80,6 +82,16 @@ class Model(object):
         else:
             with open(os.path.join(train_dir, 'model_config'), 'w') as json_file:
                 json.dump(self.model_config, json_file, indent=4)
+
+    def freeze(self):
+        """freeze most parameters"""
+        self.isFreeze = True
+        return self
+
+    def unfreeze(self):
+        """unfreeze all parameters"""
+        self.isFreeze = False
+        return self
 
     def get_global_step(self):
         """load global step from ckpt"""
@@ -328,11 +340,16 @@ class Model(object):
             global_step = tf.train.get_global_step()
             optimizer = training_schedule(
                 params['schedule'], global_step, run_config.get('max_lr'), params['num_steps'], run_config.get('pct_start'))
+            if self.isFreeze:
+                var_list = [field_posit_embedding, field_encode_embedding]
+            else:
+                var_list = None
             train_op = model_utils_py3.optimize_loss(
                 loss_train,
                 global_step,
                 optimizer,
                 wd=run_config.get('wd'),
+                var_list=var_list,
                 scope=None)
             hooks = []
             if params.get('schedule') == 'lr_finder':
