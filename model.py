@@ -40,10 +40,10 @@ class LRFinderHook(tf.train.SessionRunHook):
             self.losses_smoothed.append(loss)
         else:
             self.losses_smoothed.append(0.9*self.losses_smoothed[-1] + 0.1*loss)
-        window_size = int(0.1*self.num_steps)
-        if len(self.losses_smoothed) > window_size and \
-            (min(self.losses_smoothed[-window_size:]) > min(self.losses_smoothed) \
-            or self.losses_smoothed[-1] >= max(self.losses_smoothed[-2*window_size:-window_size])):
+        window_size = int(0.05*self.num_steps)
+        if len(self.losses_smoothed) > 2*window_size and \
+            (min(self.losses_smoothed[-window_size:]) > 1.2*min(self.losses_smoothed) \
+            or self.losses_smoothed[-1] >= 1.2*max(self.losses_smoothed[-2*window_size:-window_size])):
             run_context.request_stop()
         elif len(self.learning_rates) % int(self.num_steps / 100) == 0:
             self.ax.clear()
@@ -126,9 +126,9 @@ class Model(object):
         run_config = params['run_config']
         model_config = self.model_config
         training = (mode == tf.estimator.ModeKeys.TRAIN)
-        input_embedding, spellin_embedding, spellout_embedding, field_posit_embedding, field_encode_embedding = get_embeddings(
+        input_embedding, spellin_embedding, spellout_embedding, field_embedding = get_embeddings(
             model_config['char_vocab_size'], model_config['char_vocab_dim'], model_config.get('char_vocab_emb'),
-            model_config['layer_size'], training)
+            model_config['num_layers'], model_config['layer_size'], training)
 
         reuse=None
         for i, piece in features.items():
@@ -176,9 +176,9 @@ class Model(object):
             piece['word_masks'] = word_masks_ref
 
             # field_encodes and posit_embeds
-            field_encodes = field_encode_embedding[i+1] + tf.zeros([batch_size, max_length, model_config['layer_size']])
-            piece['field_encodes'] = field_encodes
-            posit_dim = field_posit_embedding.get_shape()[-1].value
+            field_embeds = tf.tile(tf.nn.embedding_lookup(field_embedding, [[0,]]), [batch_size, max_length, 1, 1])
+            piece['field_embeds'] = field_embeds
+            posit_dim = int(model_config['layer_size']/4)
             if schema[i]['type'] == 'sequence':
                 posit_ids = tf.tile(tf.expand_dims(tf.range(max_length), 0), [batch_size, 1])
                 posit_embeds = model_utils_py3.embed_position(
@@ -186,7 +186,6 @@ class Model(object):
                     posit_dim)
             else:
                 posit_embeds = tf.zeros([batch_size, max_length, posit_dim])
-            posit_embeds += field_posit_embedding[i+1]
             piece['posit_embeds'] = posit_embeds
 
             # picking tokens
@@ -218,16 +217,13 @@ class Model(object):
         # get the encodes
         word_masks_ref = tf.concat([features[i]['word_masks'] for i in features], axis=1)
         pick_masks_ref = tf.concat([features[i]['pick_masks'] for i in features], axis=1)
-        field_encodes_ref = tf.concat([features[i]['field_encodes'] for i in features], axis=1)
-        field_encodes_ref = tf.concat(
-            [tf.tile(tf.nn.embedding_lookup(field_encode_embedding, [[0,]]), [tf.shape(field_encodes_ref)[0],1,1]),
-            field_encodes_ref],
+        field_embeds_ref = tf.concat([features[i]['field_embeds'] for i in features], axis=1)
+        field_embeds_ref = tf.concat(
+            [tf.tile(tf.nn.embedding_lookup(field_embedding, [[0,]]), [tf.shape(field_embeds_ref)[0],1,1,1]),
+            field_embeds_ref],
             axis=1)
         posit_embeds_ref = tf.concat([features[i]['posit_embeds'] for i in features], axis=1)
-        posit_embeds_ref = tf.concat(
-            [tf.tile(tf.nn.embedding_lookup(field_posit_embedding, [[0,]]), [tf.shape(posit_embeds_ref)[0],1,1]),
-             posit_embeds_ref],
-            axis=1)
+        posit_embeds_ref = tf.pad(posit_embeds_ref, [[0,0],[1,0],[0,0]])
         word_embeds_ref = tf.pad(tf.concat([features[i]['word_embeds'] for i in features], axis=1), [[0,0],[1,0],[0,0]])
         masked_word_embeds_ref = word_embeds_ref * \
             tf.cast(tf.expand_dims(
@@ -235,15 +231,15 @@ class Model(object):
         masked_attn_masks = tf.logical_and(word_masks_ref, tf.logical_not(pick_masks_ref))
         masked_attn_masks = tf.pad(masked_attn_masks, [[0,0],[1,0]], constant_values=True)
         masked_encodes_ref = encode_words(
-            field_encodes_ref, posit_embeds_ref, masked_word_embeds_ref, masked_attn_masks,
+            field_embeds_ref, posit_embeds_ref, masked_word_embeds_ref, masked_attn_masks,
             model_config['num_layers'], run_config.get('dropout'), training)
 
         # get the loss of each piece
         masked_encodes_ref_list = tf.split(
-            masked_encodes_ref, [1,]+[features[i]['seq_length'] for i in features], axis=2)
+            masked_encodes_ref, [1,]+[features[i]['seq_length'] for i in features], axis=1)
         for i, piece in features.items():
             piece['encodes'] = masked_encodes_ref_list[i+1]
-            piece['final_encodes'] = masked_encodes_ref_list[i+1][:,-1]
+            piece['final_encodes'] = masked_encodes_ref_list[i+1][:,:,-1]
         metrics = {}
         reuse = None
         for i in features:
@@ -301,8 +297,7 @@ class Model(object):
                 # word_gen_loss
                 if token_char_ids is None:
                     word_gen_loss_ref = train_speller(
-                        tf.expand_dims(pick_word_encodes_ref, 1),
-                        tf.ones([num_pick_words, 1], dtype=tf.bool),
+                        pick_word_encodes_ref,
                         pick_segmented_seqs_ref,
                         spellin_embedding, spellout_embedding,
                         run_config.get('dropout'), training, reuse=reuse)
@@ -318,12 +313,16 @@ class Model(object):
             features[i]['word_select_loss'] = word_select_loss_ref
             features[i]['word_gen_loss'] = word_gen_loss_ref
 
-        loss_train = sum(
-            [features[i]['word_select_loss'] + features[i]['word_gen_loss'] if run_config['data'][i]['is_target'] else 
-             0.1*(features[i]['word_select_loss'] + features[i]['word_gen_loss']) for i in features])
-        loss_show = sum(
-            [features[i]['word_select_loss'] + features[i]['word_gen_loss'] if run_config['data'][i]['is_target'] else 
-             0.0 for i in features])
+        target_loss_list = []
+        regulation_loss_list = []
+        for i in features:
+            if run_config['data'][i]['is_target']:
+                target_loss_list.append(features[i]['word_select_loss'] + features[i]['word_gen_loss'])
+            else:
+                regulation_loss_list.append(features[i]['word_select_loss'] + features[i]['word_gen_loss'])
+        loss_train = sum(target_loss_list) if len(regulation_loss_list) == 0 else \
+            sum(target_loss_list) + sum(regulation_loss_list) / float(len(regulation_loss_list))
+        loss_show = sum(target_loss_list)
 
         # print total num of parameters
         total_params = 0
@@ -342,7 +341,8 @@ class Model(object):
             optimizer = training_schedule(
                 params['schedule'], global_step, run_config.get('max_lr'), params['num_steps'], run_config.get('pct_start'))
             if self.isFreeze:
-                var_list = [field_posit_embedding, field_encode_embedding]
+                var_list = [field_embedding]
+                var_list += tf.trainable_variables(scope='matcher')
             else:
                 var_list = None
             train_op = model_utils_py3.optimize_loss(

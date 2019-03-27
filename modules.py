@@ -76,6 +76,7 @@ def get_embeddings(
     char_vocab_size,
     char_vocab_dim,
     char_vocab_emb,
+    num_layers,
     layer_size,
     training,
     reuse=None):
@@ -125,25 +126,16 @@ def get_embeddings(
             is_training=training,
             scope="spellout")
 
-        field_posit_embedding = tf.get_variable(
-            "field_posit_embedding",
-            shape=[64, int(layer_size/4)],
+        field_embedding = tf.get_variable(
+            "field_embedding",
+            shape=[64, num_layers, 3*layer_size],
             dtype=tf.float32,
             initializer=tf.initializers.variance_scaling(mode='fan_out'),
             trainable=training,
             collections=collections,
             aggregation=tf.VariableAggregation.MEAN)
 
-        field_encode_embedding = tf.get_variable(
-            "field_encode_embedding",
-            shape=[64, layer_size],
-            dtype=tf.float32,
-            initializer=tf.initializers.variance_scaling(mode='fan_out'),
-            trainable=training,
-            collections=collections,
-            aggregation=tf.VariableAggregation.MEAN)
-
-    return input_embedding, spellin_embedding, spellout_embedding, field_posit_embedding, field_encode_embedding
+    return input_embedding, spellin_embedding, spellout_embedding, field_embedding
 
 def segment_words(
     seqs,
@@ -190,6 +182,12 @@ def embed_words(
         masks = tf.reduce_any(tf.not_equal(segmented_seqs, 0), axis=2)
 
         char_embeds = tf.nn.embedding_lookup(input_embedding, segmented_seqs)
+        l0_embeds = model_utils_py3.fully_connected(
+            char_embeds,
+            layer_size,
+            activation_fn=tf.nn.relu,
+            is_training=training,
+            scope="l0_convs")
         l1_embeds = model_utils_py3.convolution2d(
             char_embeds,
             [layer_size]*2,
@@ -205,25 +203,37 @@ def embed_words(
             activation_fn=tf.nn.relu,
             is_training=training,
             scope="l2_convs")
+        sum_embeds = tf.reduce_sum(char_embeds, axis=2)
+        sum_embeds = model_utils_py3.layer_norm(
+            sum_embeds, begin_norm_axis=-1, is_training=training)
         concat_embeds = tf.concat(
-            [tf.reduce_max(tf.nn.relu(char_embeds), axis=2),
+            [tf.reduce_max(l0_embeds, axis=2),
              tf.reduce_max(l1_embeds, axis=2),
              tf.reduce_max(l2_embeds, axis=2)],
             axis=-1)
-        word_embeds = model_utils_py3.GLU(
+        concat_embeds *= model_utils_py3.fully_connected(
+            sum_embeds,
+            5*layer_size,
+            activation_fn=tf.sigmoid,
+            dropout=0.5*dropout,
+            is_training=training,
+            scope="gates")
+        word_embeds = model_utils_py3.fully_connected(
             concat_embeds,
             layer_size,
             dropout=0.5*dropout,
             is_training=training,
-            scope="projs0")
+            scope="projs")
         word_embeds_normed = model_utils_py3.layer_norm(
             word_embeds, begin_norm_axis=-1, is_training=training)
-        word_embeds += model_utils_py3.GLU(
-            tf.concat([concat_embeds, word_embeds_normed], axis=-1),
+        word_embeds += model_utils_py3.MLP(
+            word_embeds_normed,
+            2,
+            2*layer_size,
             layer_size,
             dropout=0.5*dropout,
             is_training=training,
-            scope="projs1")
+            scope="MLP")
         word_embeds = model_utils_py3.layer_norm(
             word_embeds, begin_norm_axis=-1,
             is_training=training)
@@ -235,7 +245,7 @@ def embed_words(
     return word_embeds, word_masks
 
 def encode_words(
-    field_encodes,
+    field_embeds,
     posit_embeds,
     word_embeds,
     attn_masks,
@@ -260,7 +270,7 @@ def encode_words(
 
         layer_size = word_embeds.get_shape()[-1].value
         encodes = model_utils_py3.transformer(
-            field_encodes,
+            field_embeds,
             posit_embeds,
             word_embeds,
             num_layers,
@@ -293,13 +303,13 @@ def match_embeds(
         dim = encodes.get_shape()[-1].value
         encode_projs = model_utils_py3.GLU(
             encodes,
-            dim,
+            2*dim,
             dropout=dropout,
             is_training=training,
             scope="enc_projs")
         token_embed_projs = model_utils_py3.fully_connected(
             token_embeds,
-            dim,
+            2*dim,
             is_training=training,
             scope="tok_projs")
 
@@ -316,7 +326,6 @@ def match_embeds(
 
 def train_speller(
     encodes,
-    encMasks,
     targetSeqs,
     spellin_embedding,
     spellout_embedding,
@@ -326,8 +335,7 @@ def train_speller(
     """
     get the training loss of speller
     args:
-        encodes: batch_size x enc_seq_length x dim
-        encMasks: batch_size x enc_seq_length
+        encodes: batch_size x dim
         targetSeqs: batch_size x dec_seq_length
         layer_size: size of the layer
         spellin_embedding: input embedding for spelling
@@ -353,10 +361,11 @@ def train_speller(
             dynamic_size=True, clear_after_read=False, infer_shape=False)
         encode_projs = model_utils_py3.fully_connected(
             encodes,
-            input_dim,
+            2*3*output_dim,
             is_training=training,
             scope="enc_projs")
-        initialState = (decInputs, encode_projs, encMasks)
+        encode_projs = tf.reshape(encode_projs, [batch_size, 2, 3*output_dim])
+        initialState = (decInputs, encode_projs)
         inputs = tf.nn.embedding_lookup(
             spellin_embedding,
             tf.pad(targetSeqs, [[0,0],[1,0]]))
