@@ -110,10 +110,8 @@ def get_embeddings(
             aggregation=tf.VariableAggregation.MEAN)
         input_embedding = tf.concat([tf.zeros([1, char_vocab_dim]), char_embedding[1:]], axis=0)
 
-        spellin_embedding = model_utils_py3.MLP(
+        spellin_embedding = model_utils_py3.fully_connected(
             char_embedding,
-            2,
-            layer_size,
             int(layer_size/2),
             is_training=training,
             scope="spellin")
@@ -203,23 +201,15 @@ def embed_words(
             activation_fn=tf.nn.relu,
             is_training=training,
             scope="l2_convs")
-        sum_embeds = tf.reduce_sum(char_embeds, axis=2)
-        sum_embeds = model_utils_py3.layer_norm(
-            sum_embeds, begin_norm_axis=-1, is_training=training)
         concat_embeds = tf.concat(
             [tf.reduce_max(l0_embeds, axis=2),
              tf.reduce_max(l1_embeds, axis=2),
              tf.reduce_max(l2_embeds, axis=2)],
             axis=-1)
-        concat_embeds *= model_utils_py3.fully_connected(
-            sum_embeds,
-            5*layer_size,
-            activation_fn=tf.sigmoid,
-            dropout=0.5*dropout,
-            is_training=training,
-            scope="gates")
+        concat_embeds_normed = model_utils_py3.layer_norm(
+            concat_embeds, begin_norm_axis=-1, is_training=training)
         word_embeds = model_utils_py3.fully_connected(
-            concat_embeds,
+            concat_embeds_normed,
             layer_size,
             dropout=0.5*dropout,
             is_training=training,
@@ -229,7 +219,7 @@ def embed_words(
         word_embeds += model_utils_py3.MLP(
             word_embeds_normed,
             2,
-            2*layer_size,
+            layer_size,
             layer_size,
             dropout=0.5*dropout,
             is_training=training,
@@ -250,6 +240,7 @@ def encode_words(
     word_embeds,
     attn_masks,
     num_layers,
+    num_heads,
     dropout,
     training,
     reuse=None):
@@ -275,6 +266,7 @@ def encode_words(
             word_embeds,
             num_layers,
             layer_size,
+            num_heads=num_heads,
             masks=attn_masks,
             dropout=dropout,
             is_training=training,
@@ -365,7 +357,7 @@ def train_speller(
             is_training=training,
             scope="enc_projs")
         encode_projs = tf.reshape(encode_projs, [batch_size, 2, output_dim])
-        encode_projs = tf.pad(encode_projs, [[0,0],[0,0],[2*output_dim,0]])
+        encode_projs = tf.concat([tf.zeros([batch_size, 2, 2*output_dim]), encode_projs], axis=-1)
         initialState = (decInputs, encode_projs)
         inputs = tf.nn.embedding_lookup(
             spellin_embedding,

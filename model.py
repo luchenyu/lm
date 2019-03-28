@@ -61,7 +61,8 @@ class Model(object):
     def __init__(self, model_config, train_dir, pretrain_dir=None):
         """
         args:
-            model_config: {'char_vocab_size': int, 'char_vocab_dim': int, 'char_vocab_emb': np.array, 'layer_size': int, 'num_layers': int}
+            model_config: {'char_vocab_size': int, 'char_vocab_dim': int, 'char_vocab_emb': np.array,
+                'layer_size': int, 'num_layers': int, 'num_heads': int}
         """
         self.model_config = model_config
         self.train_dir = train_dir
@@ -232,7 +233,7 @@ class Model(object):
         masked_attn_masks = tf.pad(masked_attn_masks, [[0,0],[1,0]], constant_values=True)
         masked_encodes_ref = encode_words(
             field_embeds_ref, posit_embeds_ref, masked_word_embeds_ref, masked_attn_masks,
-            model_config['num_layers'], run_config.get('dropout'), training)
+            model_config['num_layers'], model_config['num_heads'], run_config.get('dropout'), training)
 
         # get the loss of each piece
         masked_encodes_ref_list = tf.split(
