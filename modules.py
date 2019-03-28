@@ -361,10 +361,11 @@ def train_speller(
             dynamic_size=True, clear_after_read=False, infer_shape=False)
         encode_projs = model_utils_py3.fully_connected(
             encodes,
-            2*3*output_dim,
+            2*output_dim,
             is_training=training,
             scope="enc_projs")
-        encode_projs = tf.reshape(encode_projs, [batch_size, 2, 3*output_dim])
+        encode_projs = tf.reshape(encode_projs, [batch_size, 2, output_dim])
+        encode_projs = tf.pad(encode_projs, [[0,0],[0,0],[2*output_dim,0]])
         initialState = (decInputs, encode_projs)
         inputs = tf.nn.embedding_lookup(
             spellin_embedding,

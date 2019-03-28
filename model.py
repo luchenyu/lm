@@ -327,7 +327,7 @@ class Model(object):
         # print total num of parameters
         total_params = 0
         for var in tf.global_variables():
-            #print(var)
+#             print(var)
             local_params=1
             shape = var.get_shape()  #getting shape of a variable
             for i in shape:
@@ -342,7 +342,7 @@ class Model(object):
                 params['schedule'], global_step, run_config.get('max_lr'), params['num_steps'], run_config.get('pct_start'))
             if self.isFreeze:
                 var_list = [field_embedding]
-                var_list += tf.trainable_variables(scope='matcher')
+#                 var_list += tf.trainable_variables(scope='matcher')
             else:
                 var_list = None
             train_op = model_utils_py3.optimize_loss(
