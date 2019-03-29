@@ -213,12 +213,12 @@ class Model(object):
                     if schema[i]['type'] == 'sequence':
                         pick_prob = 0.2
                     elif schema[i]['type'] == 'class':
-                        pick_prob = 0.8
+                        pick_prob = 1.0
                 else:
                     if schema[i]['type'] == 'sequence':
                         pick_prob = 0.1
                     elif schema[i]['type'] == 'class':
-                        pick_prob = 0.2
+                        pick_prob = 0.1
             else:
                 if run_config['data'][i]['is_target']:
                     if schema[i]['type'] == 'sequence':
