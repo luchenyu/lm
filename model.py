@@ -392,11 +392,11 @@ class Model(object):
                     candidate_final_encodes = tf.zeros_like(candidate_word_embeds)
 
                 # word_select_loss
-                word_select_logits = match_embeds(
+                word_select_logits_ref = match_embeds(
                     pick_word_encodes_ref, candidate_word_embeds, candidate_final_encodes,
                     run_config.get('dropout'), training, reuse=reuse)
                 word_select_loss_ref = tf.nn.sparse_softmax_cross_entropy_with_logits(
-                    labels=match_idxs, logits=word_select_logits)
+                    labels=match_idxs, logits=word_select_logits_ref)
                 word_select_loss_ref = tf.cond(
                     tf.greater(tf.size(word_select_loss_ref), 0),
                     lambda: tf.reduce_mean(word_select_loss_ref),
