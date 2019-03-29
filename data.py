@@ -4,7 +4,19 @@ import tensorflow as tf
 from utils import data_utils_py3
 
 """ dataset object
-    data_config: {'field_delim': string, 'schema': [{'type': 'sequence'|'class', 'token_vocab_file': none|path}, ],}
+    data_config:
+        {
+        'field_delim': string, 
+        'schema': [{
+            'field_id': int,
+            'group_id': int,
+            'item_id': int,
+            'type': 'sequence'|'class',
+            'limited_vocab': bool,
+            'token_vocab_file': none|path,
+            'copy_from': [field_ids],
+            },],
+        }
 """
 
 class Dataset(object):

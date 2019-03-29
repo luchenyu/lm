@@ -277,17 +277,20 @@ def encode_words(
 def match_embeds(
     encodes,
     token_embeds,
+    token_encodes,
     dropout,
     training,
     reuse=None):
     """
     outputs the degree of matchness of the word embeds and contexts
     args:
-        encodes: batch_size x dim
-        token_embeds: batch_size x num_candidates x dim or num_candidates x dim
-        field_embeds: dim
+        encodes: batch_size x dim or batch_size x length x dim
+        token_embeds: num_candidates x dim or batch_size x num_candidates x dim
+        token_encodes: same shape as token_embeds, for copy
         dropout: dropout ratio
         training: bool
+    returns:
+        logits: batch_size x num_candidates or batch_size x length x num_candidates
     """
 
     with tf.variable_scope("matcher", reuse=reuse):
@@ -299,19 +302,14 @@ def match_embeds(
             dropout=dropout,
             is_training=training,
             scope="enc_projs")
-        token_embed_projs = model_utils_py3.fully_connected(
-            token_embeds,
+        token_projs = model_utils_py3.fully_connected(
+            tf.concat([token_embeds, token_encodes], axis=-1),
             2*dim,
             is_training=training,
             scope="tok_projs")
 
-        if len(token_embeds.get_shape()) == 2:
-            logits = tf.matmul(
-                encode_projs, token_embed_projs, transpose_b=True)
-        else:
-            logits = tf.matmul(
-                token_embed_projs, tf.expand_dims(encode_projs, axis=-1))
-            logits = tf.squeeze(logits, axis=-1)
+        logits = tf.matmul(
+            encode_projs, token_projs, transpose_b=True)
         logits *= tf.sqrt(1.0/float(dim))
 
     return logits
