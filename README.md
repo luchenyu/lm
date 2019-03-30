@@ -13,28 +13,35 @@
 
 ## Design
 1. data_config
+```python
 {
-    'field_delim': string, 
-    'schema': \[{
-        'field_id': int,
-        'group_id': int,
-        'item_id': int,
-        'type': 'sequence'|'class',
-        'limited_vocab': bool,
-        'token_vocab_file': none|path,
-        'copy_from': \[field_ids],
-        },],
+    'field_delim': str,
+    'schema': [
+        {
+            'field_id': int,
+            'group_id': int,
+            'item_id': int,
+            'type': 'sequence'|'class',
+            'limited_vocab': bool,
+            'token_vocab_file': None|path,
+            'copy_from': [field_ids],
+        },
+    ],
 }
+```
 2. model_config
+```python
 {
     'char_vocab_size': int,
     'char_vocab_dim': int,
-    'char_vocab_emb': np.array,
+    'char_vocab_emb': numpy.array,
     'layer_size': int,
     'num_layers': int,
     'num_heads': int
 }
+```
 3. run_config
+```python
 {
     'batch_size': int,
     'max_train_steps': int,
@@ -42,8 +49,16 @@
     'pct_start': 0~1,
     'dropout': 0~1,
     'wd': float,
-    'data': \[{'is_target': true|false, 'max_token_length': int, 'min_seq_length': int, 'max_seq_length': int},],
+    'data': [
+        {
+            'is_target': True|False,
+            'max_token_length': int,
+            'min_seq_length': int,
+            'max_seq_length': int
+        },
+    ],
 }
+```
 
 ## Features
 1. Model is word-based yet the base unit is character. Model support flexible tokenization strategy. You can either limit the tokens(words) by feed a token vocab or go wild with unlimited vocabs.
