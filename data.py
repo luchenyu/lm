@@ -13,7 +13,7 @@ from utils import data_utils_py3
             'item_id': int,
             'type': 'sequence'|'class',
             'limited_vocab': bool,
-            'token_vocab_file': none|path,
+            'token_vocab': none|path,
             'copy_from': [field_ids],
             },],
         }
@@ -28,14 +28,10 @@ class Dataset(object):
         self.field_delim = data_config.get('field_delim')
         self.char_vocab = char_vocab
         for piece in self.schema:
-            token_vocab_file = piece.get('token_vocab_file')
-            if token_vocab_file != None:
-                token_vocab = data_utils_py3.Vocab(os.path.join(path, token_vocab_file))
+            token_vocab = piece.get('token_vocab')
+            if token_vocab != None:
+                token_vocab = data_utils_py3.MolecularVocab(char_vocab, filename=os.path.join(path, token_vocab))
                 piece['token_vocab'] = token_vocab
-                token_char_ids = np.array(data_utils_py3.tokens_to_char_ids(
-                    [list(i) if i != '_EOS' and i != '_UNK' else [i] for i in token_vocab.vocab_list], char_vocab))
-                token_char_ids = np.pad(token_char_ids, [[1,0],[0,0]], 'constant')
-                piece['token_char_ids'] = token_char_ids
 
     def file_input_fn(self, data_name, run_config, mode):
         """
@@ -83,22 +79,21 @@ class Dataset(object):
                         words = words[start:start+max_seq_length]
                     # tokenize
                     token_vocab = self.schema[i].get('token_vocab')
-                    if token_vocab != None:
-                        tokens = ['_EOS' if word == '\t' else word for word in words]
-                        seqs = data_utils_py3.tokens_to_token_ids(tokens, token_vocab)
+                    if self.schema[i]['limited_vocab']:
+                        tokens = [token_vocab.sep if word == '\t' else word for word in words]
+                        seqs = token_vocab.doc2idx(tokens)
                         segs = []
                     else:
-                        tokens = [['_EOS'] if word == '\t' else list(word) for word in words]
-                        seqs, segs = data_utils_py3.tokens_to_seqs_segs(tokens, self.char_vocab)
+                        seqs, segs = data_utils_py3.tokens_to_seqs_segs(words, self.char_vocab)
                 elif self.schema[i]['type'] == 'class':
                     # tokenize
                     token_vocab = self.schema[i].get('token_vocab')
-                    if token_vocab != None:
+                    if self.schema[i]['limited_vocab']:
                         tokens = [piece.strip()]
-                        seqs = data_utils_py3.tokens_to_token_ids(tokens, token_vocab)
+                        seqs = token_vocab.doc2idx(tokens)
                         segs = []
                     else:
-                        tokens = [list(piece.strip())]
+                        tokens = [piece.strip()]
                         seqs, segs = data_utils_py3.tokens_to_seqs_segs(tokens, self.char_vocab)
                 else:
                     raise NameError('wrong data type!')

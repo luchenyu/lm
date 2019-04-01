@@ -120,9 +120,7 @@ class Model(object):
                 'type': 'sequence'|'class',
                 'limited_vocab': bool,
                 'copy_from': [field_ids],
-                'token_vocab_file': none|path,
-                'token_vocab': Vocab,
-                'token_char_ids': np.array([num_token, token_len])},]
+                'token_vocab': Vocab,},]
             run_config: {'batch_size': int, 'max_train_steps': int,
                 'max_lr': float, 'pct_start': [0,1], 'dropout': [0,1], 'wd': float,
                 'data': [{'is_target': true|false, 'max_token_length': int, 'min_seq_length': int, 'max_seq_length': int},],}
@@ -146,12 +144,12 @@ class Model(object):
             segs = piece['segs']
 
             # segment
-            token_char_ids = schema[i].get('token_char_ids')
-            if not token_char_ids is None:
-                token_char_ids = tf.constant(token_char_ids, tf.int32)
-                schema[i]['token_char_ids'] = token_char_ids
+            token_vocab = schema[i].get('token_vocab')
+            if not token_vocab is None:
+                token_char_ids = tf.constant(token_vocab.decompose_table, tf.int32)
+                piece['token_char_ids'] = token_char_ids
             if schema[i]['limited_vocab']:
-                segmented_seqs_ref = tf.gather(token_char_ids, seqs)
+                segmented_seqs_ref = tf.gather(piece['token_char_ids'], seqs)
             elif schema[i]['type'] == 'class':
                 segmented_seqs_ref = tf.expand_dims(seqs, axis=1)
             else:
@@ -168,16 +166,16 @@ class Model(object):
             batch_size = tf.shape(segmented_seqs_ref)[0]
             seq_length = tf.shape(segmented_seqs_ref)[1]
             piece['seq_length'] = seq_length
-            if token_char_ids is None:
+            if token_vocab is None:
                 piece['token_length'] = tf.shape(segmented_seqs_ref)[2]
             else:
-                piece['token_length'] = tf.maximum(tf.shape(segmented_seqs_ref)[2], tf.shape(token_char_ids)[1])
+                piece['token_length'] = tf.maximum(tf.shape(segmented_seqs_ref)[2], tf.shape(piece['token_char_ids'])[1])
 
             # embed words
             reuse_local = False
-            if not token_char_ids is None:
+            if not token_vocab is None:
                 candidate_word_embeds, _ = embed_words(
-                    tf.expand_dims(token_char_ids[1:], 0), input_embedding, model_config['layer_size'],
+                    tf.expand_dims(piece['token_char_ids'][1:], 0), input_embedding, model_config['layer_size'],
                     run_config.get('dropout'), training, reuse=reuse)
                 reuse_local = True
                 candidate_word_embeds = tf.squeeze(candidate_word_embeds, [0])
@@ -240,10 +238,10 @@ class Model(object):
             features[i]['segmented_seqs'] = tf.pad(
                 features[i]['segmented_seqs'],
                 [[0,0],[0,0],[0,max_token_length-tf.shape(features[i]['segmented_seqs'])[2]]])
-            if not schema[i].get('token_char_ids') is None:
-                schema[i]['token_char_ids'] = tf.pad(
-                    schema[i]['token_char_ids'],
-                    [[0,0],[0,max_token_length-tf.shape(schema[i]['token_char_ids'])[1]]])
+            if not features[i].get('token_char_ids') is None:
+                features[i]['token_char_ids'] = tf.pad(
+                    features[i]['token_char_ids'],
+                    [[0,0],[0,max_token_length-tf.shape(features[i]['token_char_ids'])[1]]])
             
         # prepare attn_masks
         attn_masks = []
@@ -301,7 +299,7 @@ class Model(object):
 
             if training or (mode == tf.estimator.ModeKeys.EVAL and run_config['data'][i]['is_target']):
 
-                token_char_ids = schema[i].get('token_char_ids')
+                token_char_ids = features[i].get('token_char_ids')
 
                 # picked tokens
                 pick_segmented_seqs_ref = tf.boolean_mask(

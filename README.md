@@ -23,7 +23,7 @@
             'item_id': int,
             'type': 'sequence'|'class',
             'limited_vocab': bool,
-            'token_vocab_file': None|path,
+            'token_vocab': None|path,
             'copy_from': [field_ids],
         },
     ],
@@ -61,7 +61,7 @@
 ```
 
 ## Features
-1. Model is word-based yet the base unit is character. Model support flexible tokenization strategy. You can either limit the tokens(words) by feed a token vocab or go wild with unlimited vocabs.
+1. Model is word-based yet the basic unit is character. Model support flexible tokenization strategy. You can either limit the tokens(words) by feed a token vocab or go wild with unlimited vocabs.
 2. Model has a speller module to generate tokens if no token vocab is provided.
 3. Use transformer as encoder, each slot is defined by its field, position, and token.
 4. Field embeds have control on the attention part. When model is freezed, we only train the field embeds.
