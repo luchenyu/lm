@@ -377,14 +377,25 @@ class Model(object):
                     copy_from_word_masks = tf.concat(copy_from_word_masks, axis=1)
                     copy_from_pick_masks = tf.concat(copy_from_pick_masks, axis=1)
                     copy_from_valid_masks = tf.logical_and(copy_from_word_masks, tf.logical_not(copy_from_pick_masks))
+                    copy_from_match_matrix = model_utils_py3.match_vector(copy_from_segmented_seqs, copy_from_segmented_seqs)
+                    copy_from_match_matrix = tf.logical_and(copy_from_match_matrix, tf.expand_dims(copy_from_pick_masks, 1))
+                    copy_from_match_matrix = tf.logical_and(copy_from_match_matrix, tf.expand_dims(copy_from_valid_masks, 2))
+                    copy_from_scores = tf.cast(copy_from_match_matrix, tf.float32)
+                    copy_from_scores /= (tf.reduce_sum(copy_from_scores, axis=1, keepdims=True)+1e-12)
+                    copy_from_scores = tf.reduce_sum(copy_from_scores, axis=2)
                     valid_segmented_seqs = tf.boolean_mask(copy_from_segmented_seqs, copy_from_valid_masks)
+                    valid_scores = tf.boolean_mask(copy_from_scores, copy_from_valid_masks)
                     valid_final_encodes = tf.boolean_mask(copy_from_final_encodes, copy_from_valid_masks)
                     valid_final_encodes = tf.pad(valid_final_encodes, [[1,0],[0,0]])
-                    copy_match_matrix = model_utils_py3.match_vector(
+                    valid_match_matrix = model_utils_py3.match_vector(
                         candidate_segmented_seqs,
                         valid_segmented_seqs)
-                    copy_match_matrix = tf.pad(tf.cast(copy_match_matrix, tf.float32), [[0,0],[1,0]], constant_values=1.0)
-                    sample_ids = tf.squeeze(tf.random.categorical(tf.log(copy_match_matrix), 1, dtype=tf.int32), axis=[-1])
+                    valid_match_matrix = tf.cast(valid_match_matrix, tf.float32)
+                    valid_match_scores = valid_match_matrix * tf.expand_dims(valid_scores, axis=0)
+                    valid_pad_score = tf.reduce_sum(valid_match_scores, axis=1, keepdims=True) * \
+                        tf.maximum(tf.reduce_sum(valid_match_scores, axis=1, keepdims=True)-1.0, 0)
+                    valid_match_scores = tf.concat([valid_pad_score, valid_match_scores], axis=1)
+                    sample_ids = tf.squeeze(tf.random.categorical(tf.log(valid_match_scores), 1, dtype=tf.int32), axis=[-1])
                     candidate_final_encodes = tf.gather(valid_final_encodes, sample_ids)
                 else:
                     candidate_final_encodes = tf.zeros_like(candidate_word_embeds)
