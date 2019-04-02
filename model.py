@@ -372,6 +372,7 @@ class Model(object):
                             copy_from_final_encodes.append(features[j]['final_encodes'])
                             copy_from_word_masks.append(features[j]['word_masks'])
                             copy_from_pick_masks.append(features[j]['pick_masks'])
+                    # first we get the matrix indicates whether x copy to y
                     copy_from_segmented_seqs = tf.concat(copy_from_segmented_seqs, axis=1)
                     copy_from_final_encodes = tf.concat(copy_from_final_encodes, axis=1)
                     copy_from_word_masks = tf.concat(copy_from_word_masks, axis=1)
@@ -380,20 +381,25 @@ class Model(object):
                     copy_from_match_matrix = model_utils_py3.match_vector(copy_from_segmented_seqs, copy_from_segmented_seqs)
                     copy_from_match_matrix = tf.logical_and(copy_from_match_matrix, tf.expand_dims(copy_from_pick_masks, 1))
                     copy_from_match_matrix = tf.logical_and(copy_from_match_matrix, tf.expand_dims(copy_from_valid_masks, 2))
+                    # calculate the normalized prob each slot being copied
                     copy_from_scores = tf.cast(copy_from_match_matrix, tf.float32)
                     copy_from_scores /= (tf.reduce_sum(copy_from_scores, axis=1, keepdims=True)+1e-12)
                     copy_from_scores = tf.reduce_sum(copy_from_scores, axis=2)
+                    # gather all valid slots which can be selected from
                     valid_segmented_seqs = tf.boolean_mask(copy_from_segmented_seqs, copy_from_valid_masks)
                     valid_scores = tf.boolean_mask(copy_from_scores, copy_from_valid_masks)
                     valid_final_encodes = tf.boolean_mask(copy_from_final_encodes, copy_from_valid_masks)
                     valid_final_encodes = tf.pad(valid_final_encodes, [[1,0],[0,0]])
+                    # for each candidate token, we gather the probs of all corresponding slots
                     valid_match_matrix = model_utils_py3.match_vector(
                         candidate_segmented_seqs,
                         valid_segmented_seqs)
                     valid_match_matrix = tf.cast(valid_match_matrix, tf.float32)
-                    valid_match_scores = valid_match_matrix * tf.expand_dims(valid_scores, axis=0)
+                    valid_match_scores = valid_match_matrix * (tf.expand_dims(valid_scores, axis=0)+1e-12)
+                    # scale the probs of all slots of one candidate so that high-freq candidate has low prob to be copied
+                    scale = 64.0 / tf.cast(num_pick_words, tf.float32)
                     valid_pad_score = tf.reduce_sum(valid_match_scores, axis=1, keepdims=True) * \
-                        tf.maximum(tf.reduce_sum(valid_match_scores, axis=1, keepdims=True)-1.0, 0)
+                        (tf.maximum(tf.reduce_sum(valid_match_scores, axis=1, keepdims=True) * scale, 1.0)-1.0)+1e-12
                     valid_match_scores = tf.concat([valid_pad_score, valid_match_scores], axis=1)
                     sample_ids = tf.squeeze(tf.random.categorical(tf.log(valid_match_scores), 1, dtype=tf.int32), axis=[-1])
                     candidate_final_encodes = tf.gather(valid_final_encodes, sample_ids)
