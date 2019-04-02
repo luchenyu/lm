@@ -395,7 +395,7 @@ class Model(object):
                         candidate_segmented_seqs,
                         valid_segmented_seqs)
                     valid_match_matrix = tf.cast(valid_match_matrix, tf.float32)
-                    valid_match_scores = valid_match_matrix * (tf.expand_dims(valid_scores, axis=0)+1e-12)
+                    valid_match_scores = valid_match_matrix * tf.expand_dims(valid_scores+1e-12, axis=0)
                     # scale the probs of all slots of one candidate so that high-freq candidate has low prob to be copied
                     scale = 64.0 / tf.cast(num_pick_words, tf.float32)
                     valid_pad_score = tf.reduce_sum(valid_match_scores, axis=1, keepdims=True) * \
