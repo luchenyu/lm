@@ -398,8 +398,9 @@ class Model(object):
                     valid_match_scores = valid_match_matrix * tf.expand_dims(valid_scores+1e-12, axis=0)
                     # scale the probs of all slots of one candidate so that high-freq candidate has low prob to be copied
                     scale = 64.0 / tf.cast(num_pick_words, tf.float32)
-                    valid_pad_score = tf.reduce_sum(valid_match_scores, axis=1, keepdims=True) * \
-                        (tf.maximum(tf.reduce_sum(valid_match_scores, axis=1, keepdims=True) * scale, 1.0)-1.0)+1e-12
+                    valid_match_scores_sum = tf.reduce_sum(valid_match_scores, axis=1, keepdims=True)
+                    valid_pad_score = valid_match_scores_sum * \
+                        tf.maximum(valid_match_scores_sum * scale - 1.0, 0.0)+1e-12
                     valid_match_scores = tf.concat([valid_pad_score, valid_match_scores], axis=1)
                     sample_ids = tf.squeeze(tf.random.categorical(tf.log(valid_match_scores), 1, dtype=tf.int32), axis=[-1])
                     candidate_final_encodes = tf.gather(valid_final_encodes, sample_ids)
