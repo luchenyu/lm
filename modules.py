@@ -304,7 +304,7 @@ class Embedder(Module):
             batch_size = tf.shape(segmented_seqs)[0]
             max_word_length = tf.shape(segmented_seqs)[1]
             max_char_length = tf.shape(segmented_seqs)[2]
-            masks = tf.reduce_any(tf.not_equal(segmented_seqs, 0), axis=2)
+            word_masks = tf.reduce_any(tf.not_equal(segmented_seqs, 0), axis=2)
 
             char_embeds = tf.nn.embedding_lookup(self.input_embedding, segmented_seqs)
             l0_embeds = model_utils_py3.fully_connected(
@@ -355,9 +355,7 @@ class Embedder(Module):
                 word_embeds, begin_norm_axis=-1,
                 is_training=self.training)
 
-            masksLeft = tf.pad(masks, [[0,0],[1,0]])[:,:-1]
-            masksRight = tf.pad(masks, [[0,0],[0,1]])[:,1:]
-            word_masks = tf.logical_or(masks, tf.logical_or(masksLeft, masksRight))
+            word_embeds *= tf.expand_dims(tf.cast(word_masks, tf.float32), axis=2)
 
         self.reuse = True
 

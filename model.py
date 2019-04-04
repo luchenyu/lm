@@ -123,7 +123,7 @@ class Model(object):
                 'token_vocab': Vocab,},]
             run_config: {'batch_size': int, 'max_train_steps': int,
                 'max_lr': float, 'pct_start': [0,1], 'dropout': [0,1], 'wd': float,
-                'data': [{'is_target': true|false, 'max_token_length': int, 'min_seq_length': int, 'max_seq_length': int},],}
+                'data': [{'target_level': int >= 0, 'max_token_length': int, 'min_seq_length': int, 'max_seq_length': int},],}
             schedule: '1cycle'|'lr_finder'
             num_steps: int
             distributed: bool
@@ -158,7 +158,7 @@ class Model(object):
                 'token_vocab': Vocab,},]
             run_config: {'batch_size': int, 'max_train_steps': int,
                 'max_lr': float, 'pct_start': [0,1], 'dropout': [0,1], 'wd': float,
-                'data': [{'is_target': true|false, 'max_token_length': int, 'min_seq_length': int, 'max_seq_length': int},],}
+                'data': [{'target_level': int >= 0, 'max_token_length': int, 'min_seq_length': int, 'max_seq_length': int},],}
             schedule: '1cycle'|'lr_finder'
             num_steps: int
             distributed: bool
@@ -529,7 +529,7 @@ class Model(object):
                 'token_vocab': Vocab,},]
             run_config: {'batch_size': int, 'max_train_steps': int,
                 'max_lr': float, 'pct_start': [0,1], 'dropout': [0,1], 'wd': float,
-                'data': [{'is_target': true|false, 'max_token_length': int, 'min_seq_length': int, 'max_seq_length': int},],}
+                'data': [{'target_level': int >= 0, 'max_token_length': int, 'min_seq_length': int, 'max_seq_length': int},],}
             schedule: '1cycle'|'lr_finder'
             num_steps: int
             distributed: bool
@@ -564,12 +564,15 @@ class Model(object):
                                    training=False)
         posit_size = int(model_config['layer_size']/4)
         batch_size = tf.shape(features[0]['seqs'])[0]
+        max_target_level = max([item['target_level'] for item in run_config['data']])
 
         for i, piece in features.items():
 
             seqs = piece['seqs']
             segs = piece['segs']
             piece['features'] = {}
+            if run_config['data'][schema[i]['field_id']]['target_level'] > 0:
+                piece['masked_features'] = {}
 
             # segment
             token_vocab = schema[i].get('token_vocab')
@@ -612,6 +615,8 @@ class Model(object):
                     segmented_seqs_ref)
             piece['word_embeds'] = word_embeds_ref
             piece['word_masks'] = word_masks_ref
+            piece['features']['masks'] = piece['word_masks']
+            piece['features']['token_embeds'] = piece['word_embeds']
 
             # field_encodes and posit_embeds
             piece['features']['field_query_embeds'] = tf.tile(
@@ -638,14 +643,14 @@ class Model(object):
                     pick_prob = 0.2
                 elif schema[i]['type'] == 'class':
                     pick_prob = 1.0
-            else:
-                pick_prob = 0.0
-            pick_masks_ref = tf.less(tf.random_uniform([batch_size, seq_length]), pick_prob)
-            pick_masks_ref = tf.logical_and(pick_masks_ref, word_masks_ref)
-            piece['pick_masks'] = pick_masks_ref
-            piece['features']['masks'] = tf.logical_and(piece['word_masks'], tf.logical_not(piece['pick_masks']))
-            piece['features']['token_embeds'] = piece['word_embeds'] * \
-                tf.cast(tf.expand_dims(piece['features']['masks'], axis=2), tf.float32)
+                pick_masks_ref = tf.less(tf.random_uniform([batch_size, seq_length]), pick_prob)
+                pick_masks_ref = tf.logical_and(pick_masks_ref, word_masks_ref)
+                piece['pick_masks'] = pick_masks_ref
+                piece['masked_features']['masks'] = tf.logical_and(piece['word_masks'], tf.logical_not(piece['pick_masks']))
+                piece['masked_features']['token_embeds'] = piece['word_embeds'] * \
+                    tf.cast(tf.expand_dims(piece['masked_features']['masks'], axis=2), tf.float32)
+                for key in ['field_query_embeds', 'field_key_embeds', 'field_value_embeds', 'posit_embeds']:
+                    piece['masked_features'][key] = piece['features'][key]
 
         # pad segmented_seqs and token_ids to same token_length
         max_token_length = tf.reduce_max(tf.stack([features[i]['token_length'] for i in features], axis=0))
@@ -669,31 +674,53 @@ class Model(object):
             'masks': tf.ones([batch_size, 1], dtype=tf.bool)
         }
 
-        # prepare attn_matrix
-        attn_matrix = []
-        attn_matrix.append([1]*(len(features)+1))
-        for i in features:
-            attn_matrix_local = [0]
-            for j in features:
-                if i == j:
-                    attn_matrix_local.append(1)
-                elif schema[i]['group_id'] == schema[j]['group_id'] and schema[i]['item_id'] != schema[j]['item_id']:
-                    attn_matrix_local.append(0)
-                elif run_config['data'][schema[j]['field_id']]['target_level'] == 0:
-                    attn_matrix_local.append(1)
-                elif run_config['data'][schema[i]['field_id']]['target_level'] > \
-                    run_config['data'][schema[j]['field_id']]['target_level']:
-                    attn_matrix_local.append(1)
-                else:
-                    attn_matrix_local.append(0)
-            attn_matrix.append(attn_matrix_local)
+        # loop for target_level
+        extra_feature_list = []
+        extra_feature_id_list = []
+        for tlevel in range(max_target_level+1):
 
-        # get encodes
-        feature_list = [global_feature] + [features[i]['features'] for i in features]
-        feature_list = encode_features(word_encoder, feature_list, attn_matrix)
+            # gather features
+            feature_list, masked_feature_list, feature_id_list = [], [], []
+            for i in features:
+                if run_config['data'][schema[i]['field_id']]['target_level'] == tlevel:
+                    feature_id_list.append(i)
+                    feature_list.append(features[i]['features'])
+                    if tlevel > 0:
+                        masked_feature_list.append(features[i]['masked_features'])
+
+            # prepare attn_matrix
+            attn_matrix = []
+            for i in feature_id_list:
+                attn_matrix_local = []
+                for j in feature_id_list:
+                    if i == j:
+                        attn_matrix_local.append(1)
+                    elif schema[i]['group_id'] == schema[j]['group_id'] and schema[i]['item_id'] != schema[j]['item_id']:
+                        attn_matrix_local.append(0)
+                    elif tlevel == 0:
+                        attn_matrix_local.append(1)
+                    else:
+                        attn_matrix_local.append(0)
+                for j in extra_feature_id_list:
+                    if schema[i]['group_id'] == schema[j]['group_id'] and schema[i]['item_id'] != schema[j]['item_id']:
+                        attn_matrix_local.append(0)
+                    else:
+                        attn_matrix_local.append(1)
+                attn_matrix.append(attn_matrix_local)
+
+            # get encodes
+            if tlevel > 0:
+                masked_feature_list = encode_features(
+                    word_encoder, masked_feature_list, attn_matrix, extra_feature_list)
+            if tlevel < max_target_level:
+                feature_list = encode_features(
+                    word_encoder, feature_list, attn_matrix, extra_feature_list)
+                extra_feature_list.extend(feature_list)
+                extra_feature_id_list.extend(feature_id_list)
 
         # get the loss of each piece
         metrics = {}
+        target_loss_list = []
         for i in features:
 
             if run_config['data'][schema[i]['field_id']]['target_level'] > 0:
@@ -705,7 +732,7 @@ class Model(object):
                     features[i]['segmented_seqs'],
                     features[i]['pick_masks'])
                 _, pick_word_encodes_ref = tf.dynamic_partition(
-                    features[i]['features']['encodes'], tf.cast(features[i]['pick_masks'], tf.int32), 2)
+                    features[i]['masked_features']['encodes'], tf.cast(features[i]['pick_masks'], tf.int32), 2)
                 num_pick_words = tf.shape(pick_word_encodes_ref)[0]
                 
                 # form candidates
@@ -768,8 +795,8 @@ class Model(object):
                     for j in features:
                         if schema[j]['field_id'] in schema[i]['copy_from']:
                             copy_from_segmented_seqs.append(features[j]['segmented_seqs'])
-                            copy_from_final_encodes.append(features[j]['features']['encodes'])
-                            copy_from_valid_masks.append(features[j]['features']['masks'])
+                            copy_from_final_encodes.append(features[j]['masked_features']['encodes'])
+                            copy_from_valid_masks.append(features[j]['masked_features']['masks'])
                             copy_from_pick_masks.append(features[j]['pick_masks'])
                     # first we get the matrix indicates whether x copy to y
                     copy_from_segmented_seqs = tf.concat(copy_from_segmented_seqs, axis=1)
@@ -834,19 +861,10 @@ class Model(object):
                 else:
                     word_gen_loss_ref = tf.zeros([])
 
-            else:
-                word_select_loss_ref = tf.zeros([])
-                word_gen_loss_ref = tf.zeros([])
-
-            features[i]['word_select_loss'] = word_select_loss_ref
-            features[i]['word_gen_loss'] = word_gen_loss_ref
+                target_loss_list.append(word_select_loss_ref + word_gen_loss_ref)
 
         # gather losses
-        target_loss_list = []
-        for i in features:
-            if run_config['data'][schema[i]['field_id']]['target_level'] > 0:
-                target_loss_list.append(features[i]['word_select_loss'] + features[i]['word_gen_loss'])
-        loss_show = sum(target_loss_list)
+        loss = sum(target_loss_list)
 
         # print total num of parameters
         total_params = 0
@@ -861,7 +879,7 @@ class Model(object):
 
         # return EstimatorSpec
         return tf.estimator.EstimatorSpec(
-            tf.estimator.ModeKeys.EVAL, loss=loss_show, eval_metric_ops=metrics)
+            tf.estimator.ModeKeys.EVAL, loss=loss, eval_metric_ops=metrics)
 
     def predict_fn(
         self,
@@ -883,7 +901,7 @@ class Model(object):
                 'token_vocab': Vocab,},]
             run_config: {'batch_size': int, 'max_train_steps': int,
                 'max_lr': float, 'pct_start': [0,1], 'dropout': [0,1], 'wd': float,
-                'data': [{'is_target': true|false, 'max_token_length': int, 'min_seq_length': int, 'max_seq_length': int},],}
+                'data': [{'target_level': int >= 0, 'max_token_length': int, 'min_seq_length': int, 'max_seq_length': int},],}
             schedule: '1cycle'|'lr_finder'
             num_steps: int
             distributed: bool
@@ -987,7 +1005,7 @@ class Model(object):
             piece['features']['posit_embeds'] = posit_embeds
 
             # picking tokens
-            if run_config['data'][schema[i]['field_id']]['is_target']:
+            if run_config['data'][schema[i]['field_id']]['target_level'] > 0:
                 if schema[i]['type'] == 'sequence':
                     pick_prob = 0.2
                 elif schema[i]['type'] == 'class':
