@@ -13,7 +13,7 @@
 
 ## Design
 1. data_config
-```python
+```json
 {
     'field_delim': str,
     'schema': [
@@ -30,7 +30,7 @@
 }
 ```
 2. model_config
-```python
+```json
 {
     'char_vocab_size': int,
     'char_vocab_dim': int,
@@ -41,7 +41,7 @@
 }
 ```
 3. run_config
-```python
+```json
 {
     'batch_size': int,
     'max_train_steps': int,
@@ -51,12 +51,27 @@
     'wd': float,
     'data': [
         {
-            'is_target': True|False,
+            'target_level': int >= 0,
             'max_token_length': int,
             'min_seq_length': int,
             'max_seq_length': int
-        },
+        }, //indexed by field_id, not default feature_id
     ],
+}
+```
+4. features structure
+```json
+{
+    'field_query_embeds': batch_size x length x num_layers*layer_size,
+    'field_key_embeds': batch_size x length x num_layers*layer_size,
+    'field_value_embeds': batch_size x length x num_layers*layer_size,
+    'posit_embeds': batch_size x length x posit_size,
+    'token_embeds': batch_size x length x embed_size,
+    'masks': batch_size x length,
+    'querys': batch_size x length x num_layers*layer_size,
+    'keys': batch_size x length x num_layers*layer_size,
+    'values': batch_size x length x num_layers*layer_size,
+    'encodes': batch_size x length x layer_size
 }
 ```
 

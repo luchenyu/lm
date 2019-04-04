@@ -1,4 +1,4 @@
-import logging, os
+import logging, os, traceback
 import tensorflow as tf
 
 
@@ -63,25 +63,30 @@ def train_and_evaluate(
 
     # get TF logger
     log = logging.getLogger('tensorflow')
-    log.setLevel(logging.INFO)
     # create formatter and add it to the handlers
     formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     # create file handler which logs even debug messages
     fh = logging.FileHandler(os.path.join(model.train_dir, 'tensorflow.log'))
     fh.setLevel(logging.INFO)
     fh.setFormatter(formatter)
-    log.addHandler(fh)
+    try:
+        log.addHandler(fh)
 
-    # start train and eval loop
-    counter = model.get_global_step()
-    while counter < run_config['max_train_steps']:
-        steps = min(eval_every - (counter % eval_every), run_config['max_train_steps'] - counter)
-        lm.train(
-            input_fn=lambda: dataset.file_input_fn('train', run_config, tf.estimator.ModeKeys.TRAIN),
-            steps=steps)
+        # start train and eval loop
         counter = model.get_global_step()
-        lm.evaluate(
-            input_fn=lambda: dataset.file_input_fn('dev', run_config, tf.estimator.ModeKeys.EVAL))
+        while counter < run_config['max_train_steps']:
+            steps = min(eval_every - (counter % eval_every), run_config['max_train_steps'] - counter)
+            lm.train(
+                input_fn=lambda: dataset.file_input_fn('train', run_config, tf.estimator.ModeKeys.TRAIN),
+                steps=steps)
+            counter = model.get_global_step()
+            lm.evaluate(
+                input_fn=lambda: dataset.file_input_fn('dev', run_config, tf.estimator.ModeKeys.EVAL))
+    except:
+        traceback.print_exc()
+    finally:
+        # clear logger handler
+        log.removeHandler(fh)
 
 def evaluate(
     dataset,

@@ -4,23 +4,9 @@ import tensorflow as tf
 from utils import model_utils_py3
 
 
-""" training schedule """
+"""handy functions"""
 
-class MyAdamOptimizer(tf.train.AdamOptimizer):
-    def __init__(self, learning_rate=0.001, beta1=0.9, beta1_t=None, beta2=0.999, epsilon=1e-8,
-                 use_locking=False, name="Adam"):
-        """beta1 is the initial momentum, beta1_t is the dynamic momentum"""
-        tf.train.AdamOptimizer.__init__(
-            self, learning_rate=learning_rate, beta1=beta1, beta2=beta2, epsilon=epsilon,
-            use_locking=use_locking, name=name)
-        self.beta1_t = beta1_t
-
-    def _prepare(self):
-        tf.train.AdamOptimizer._prepare(self)
-        if self.beta1_t != None:
-            self._beta1_t = self.beta1_t
-
-def training_schedule(
+def get_optimizer(
     schedule,
     global_step,
     max_lr,
@@ -72,16 +58,13 @@ def training_schedule(
 
     return optimizer
 
-
-"""get various embeddings"""
-
 def get_embeddings(
     char_vocab_size,
     char_vocab_dim,
     char_vocab_emb,
     num_layers,
     layer_size,
-    training,
+    training=True,
     reuse=None):
     """
     get various embedding matrix
@@ -112,8 +95,10 @@ def get_embeddings(
             aggregation=tf.VariableAggregation.MEAN)
         input_embedding = tf.concat([tf.zeros([1, char_vocab_dim]), char_embedding[1:]], axis=0)
 
-        spellin_embedding = model_utils_py3.fully_connected(
+        spellin_embedding = model_utils_py3.MLP(
             char_embedding,
+            2,
+            layer_size,
             int(layer_size/2),
             is_training=training,
             scope="spellin")
@@ -147,9 +132,6 @@ def get_embeddings(
 
     return input_embedding, spellin_embedding, field_query_embedding, field_key_embedding, field_value_embedding
 
-
-"""non-parametric modules"""
-
 def segment_words(
     seqs,
     segs):
@@ -169,6 +151,322 @@ def segment_words(
         segmented_seqs_ref = tf.stop_gradient(segmented_seqs_ref)
 
     return segmented_seqs_ref
+
+def encode_features(
+    encoder,
+    feature_list,
+    attn_matrix,
+    extra_feature_list=[]):
+    """
+    encode the features and distribute the result
+    """
+    with tf.variable_scope("encode_features"):
+
+        batch_size = tf.shape(feature_list[0]['token_embeds'])[0]
+        attn_list = feature_list
+        to_attn_list = feature_list + extra_feature_list
+        input_keys = [
+            'field_query_embeds', 'field_key_embeds', 'field_value_embeds', 'posit_embeds', 'token_embeds', 'masks',
+        ]
+        output_keys = [
+            'querys', 'keys', 'values', 'encodes',
+        ]
+
+        # prepare attn_masks
+        attn_masks = []
+        feature_lengths = []
+        for i, fi in enumerate(attn_list):
+            attn_masks_local = []
+            length_i = tf.shape(fi['token_embeds'])[1]
+            feature_lengths.append(length_i)
+            for j, fj in enumerate(to_attn_list):
+                length_j = tf.shape(fj['token_embeds'])[1]
+                if attn_matrix[i][j] == 0:
+                    attn_masks_local.append(
+                        tf.zeros([batch_size, length_i, length_j], dtype=tf.bool))
+                else:
+                    attn_masks_local.append(
+                        tf.tile(tf.expand_dims(fj['masks'], axis=1), [1, length_i, 1]))
+            attn_masks_local = tf.concat(attn_masks_local, axis=2)
+            attn_masks.append(attn_masks_local)
+        attn_masks = tf.concat(attn_masks, axis=1)
+
+        # prepare concat_features
+        if len(feature_list) <= 1:
+            concat_features = feature_list[0]
+        else:
+            concat_features = {}
+            for key in input_keys:
+                concat_features[key] = tf.concat(
+                    [f[key] for f in feature_list], axis=1)
+        if len(extra_feature_list) == 0:
+            extra_concat_features = None
+        elif len(extra_feature_list) == 1:
+            extra_concat_features = extra_feature_list[0]
+        else:
+            extra_concat_features = {}
+            for key in input_keys:
+                extra_concat_features[key] = tf.concat(
+                    [f[key] for f in extra_feature_list], axis=1)
+
+        # encode
+        concat_features = encoder(concat_features, attn_masks, extra_concat_features)
+
+        # split and distribute results
+        if len(feature_list) > 1:
+            for key in output_keys:
+                splitted = tf.split(concat_features[key], feature_lengths, axis=1)
+                for i, fi in enumerate(feature_list):
+                    fi[key] = splitted[i]
+
+    return feature_list
+
+def get_speller_loss(
+    speller_cell,
+    target_seqs,
+    spellin_embedding,
+    speller_matcher):
+    """
+    get the loss of speller
+    args:
+        speller_cell: speller cell
+        target_seqs: batch_size x dec_seq_length
+        spellin_embedding: input embedding for spelling
+        speller_encoder: transformer encoder
+        speller_matcher: matcher module
+    """
+    with tf.variable_scope("train_speller"):
+
+        batch_size = tf.shape(target_seqs)[0]
+
+        initial_state = (None, tf.zeros([batch_size], dtype=tf.int32))
+        inputs = tf.nn.embedding_lookup(
+            spellin_embedding,
+            tf.pad(target_seqs, [[0,0],[1,0]]))
+        target_seqs = tf.pad(target_seqs, [[0,0],[0,1]])
+        decMasks = tf.not_equal(target_seqs, 0)
+        decMasks = tf.logical_or(decMasks, tf.pad(tf.not_equal(target_seqs, 0), [[0,0],[1,0]])[:,:-1])
+        outputs, state = speller_cell(inputs, initial_state)
+        _, valid_outputs = tf.dynamic_partition(
+            outputs, tf.cast(decMasks, tf.int32), 2)
+        valid_target_seqs = tf.boolean_mask(target_seqs, decMasks)
+        valid_logits = speller_matcher(valid_outputs, spellin_embedding)
+        valid_losses = tf.nn.sparse_softmax_cross_entropy_with_logits(
+            labels=valid_target_seqs,
+            logits=valid_logits)
+        loss = tf.cond(
+            tf.greater(tf.size(valid_losses), 0),
+            lambda: tf.reduce_mean(valid_losses),
+            lambda: tf.zeros([]))
+
+    return loss
+
+
+"""Modules"""
+
+class Module(object):
+    """
+    maintains module parameters, scope and reuse state
+    """
+    def __init__(self, scope, dropout=None, training=False):
+        self.reuse = None
+        self.dropout = dropout
+        self.training = training
+        with tf.variable_scope(scope) as sc:
+            self.scope = sc
+
+class Embedder(Module):
+    """
+    Word embedder
+    embed seqs of chars into word embeddings
+    """
+    def __init__(self, input_embedding, layer_size,
+                 scope, dropout=None, training=False):
+        """
+        args:
+            input_embedding: num_embedding x embedding_dim
+            layer_size: size of layer
+        """
+        self.input_embedding = input_embedding
+        self.layer_size = layer_size
+        Module.__init__(self, scope, dropout, training)
+
+    def __call__(self, segmented_seqs):
+        """
+        args:
+            segmented_seqs: batch_size x word_length x char_length
+        returns:
+            word_embeds: batch_size x word_length x layer_size
+            word_masks: batch_size x word_length
+        """
+        with tf.variable_scope(self.scope, reuse=self.reuse):
+
+            batch_size = tf.shape(segmented_seqs)[0]
+            max_word_length = tf.shape(segmented_seqs)[1]
+            max_char_length = tf.shape(segmented_seqs)[2]
+            masks = tf.reduce_any(tf.not_equal(segmented_seqs, 0), axis=2)
+
+            char_embeds = tf.nn.embedding_lookup(self.input_embedding, segmented_seqs)
+            l0_embeds = model_utils_py3.fully_connected(
+                char_embeds,
+                self.layer_size,
+                activation_fn=tf.nn.relu,
+                is_training=self.training,
+                scope="l0_convs")
+            l1_embeds = model_utils_py3.convolution2d(
+                char_embeds,
+                [self.layer_size]*2,
+                [[1,2],[1,3]],
+                activation_fn=tf.nn.relu,
+                is_training=self.training,
+                scope="l1_convs")
+            char_embeds = tf.nn.max_pool(char_embeds, [1,1,2,1], [1,1,2,1], padding='SAME')
+            l2_embeds = model_utils_py3.convolution2d(
+                char_embeds,
+                [self.layer_size]*2,
+                [[1,2],[1,3]],
+                activation_fn=tf.nn.relu,
+                is_training=self.training,
+                scope="l2_convs")
+            concat_embeds = tf.concat(
+                [tf.reduce_max(l0_embeds, axis=2),
+                 tf.reduce_max(l1_embeds, axis=2),
+                 tf.reduce_max(l2_embeds, axis=2)],
+                axis=-1)
+            concat_embeds_normed = model_utils_py3.layer_norm(
+                concat_embeds, begin_norm_axis=-1, is_training=self.training)
+            word_embeds = model_utils_py3.fully_connected(
+                concat_embeds_normed,
+                self.layer_size,
+                dropout=self.dropout,
+                is_training=self.training,
+                scope="projs")
+            word_embeds_normed = model_utils_py3.layer_norm(
+                word_embeds, begin_norm_axis=-1, is_training=self.training)
+            word_embeds += model_utils_py3.MLP(
+                word_embeds_normed,
+                2,
+                2*self.layer_size,
+                self.layer_size,
+                dropout=self.dropout,
+                is_training=self.training,
+                scope="MLP")
+            word_embeds = model_utils_py3.layer_norm(
+                word_embeds, begin_norm_axis=-1,
+                is_training=self.training)
+
+            masksLeft = tf.pad(masks, [[0,0],[1,0]])[:,:-1]
+            masksRight = tf.pad(masks, [[0,0],[0,1]])[:,1:]
+            word_masks = tf.logical_or(masks, tf.logical_or(masksLeft, masksRight))
+
+        self.reuse = True
+
+        return word_embeds, word_masks
+
+class Encoder(Module):
+    """
+    Transformer encoder
+    """
+    def __init__(self, layer_size, num_layers, num_heads,
+                 scope, dropout=None, training=False):
+        """
+        args:
+            layer_size: size of layer
+            num_layers: num of layers
+            num_heads: num of attention heads
+        """
+        self.layer_size = layer_size
+        self.num_layers = num_layers
+        self.num_heads = num_heads
+        Module.__init__(self, scope, dropout, training)
+
+    def __call__(self, features, attn_masks, extra_features=None):
+        """
+        args:
+            features: {
+                'field_query_embeds': batch_size x length x num_layers*layer_size,
+                'field_key_embeds': batch_size x length x num_layers*layer_size,
+                'field_value_embeds': batch_size x length x num_layers*layer_size,
+                'posit_embeds': batch_size x length x layer_size,
+                'token_embeds': batch_size x length x layer_size,
+                'masks': batch_size x length,
+                'querys': batch_size x length x num_layers*layer_size,
+                'keys': batch_size x length x num_layers*layer_size,
+                'values': batch_size x length x num_layers*layer_size,
+                'encodes': batch_size x length x layer_size
+            }
+            attn_masks, batch_size x length x (length+extra_length)
+        returns:
+            features
+        """
+        features = model_utils_py3.transformer(
+            features,
+            self.num_layers,
+            self.layer_size,
+            extra_features=extra_features,
+            num_heads=self.num_heads,
+            attn_masks=attn_masks,
+            dropout=self.dropout,
+            is_training=self.training,
+            reuse=self.reuse,
+            scope=self.scope)
+
+        self.reuse = True
+
+        return features
+
+class Matcher(Module):
+    """
+    Matcher to get the logits of output probs
+    """
+    def __init__(self, layer_size,
+                 scope, dropout=None, training=False):
+        """
+        args:
+            layer_size: size of layer
+            has_copy: whether has copy mechanism
+        """
+        self.layer_size = layer_size
+        self.cached = {}
+        Module.__init__(self, scope, dropout, training)
+
+    def __call__(self, encodes, token_embeds):
+        """
+        args:
+            encodes: batch_size x dim or batch_size x length x dim
+            token_embeds: num_candidates x token_dim or batch_size x num_candidates x token_dim
+        returns:
+            logits: batch_size x num_candidates or batch_size x length x num_candidates
+        """
+        with tf.variable_scope(self.scope, reuse=self.reuse):
+
+            encode_projs = model_utils_py3.GLU(
+                encodes,
+                self.layer_size,
+                dropout=self.dropout,
+                is_training=self.training,
+                scope="enc_projs")
+            encode_projs *= tf.sqrt(1.0/float(self.layer_size))
+
+            if self.cached.get(token_embeds) != None:
+                token_projs = self.cached[token_embeds]
+            else:
+                token_projs = model_utils_py3.fully_connected(
+                    token_embeds,
+                    self.layer_size,
+                    is_training=self.training,
+                    scope="tok_projs")
+                self.cached[token_embeds] = token_projs
+
+            logits = tf.matmul(
+                encode_projs, token_projs, transpose_b=True)
+
+        self.reuse = True
+
+        return logits
+
+
+"""Cells"""
 
 class TransformerCell(model_utils_py3.GeneralCell):
     """Cell that wraps transformer"""
@@ -261,9 +559,7 @@ class TransformerCell(model_utils_py3.GeneralCell):
                     axis=2)
 
             features = self.assets['encoder'](features, attn_masks,
-                                         extra_features=extra_features,
-                                         dropout=self.assets['dropout'],
-                                         training=self.assets['training'])
+                                         extra_features=extra_features)
             input_features, output_features = model_utils_py3.split_features(features, 2)
             outputs = output_features['encodes']
             if to_squeeze:
@@ -316,6 +612,7 @@ class SpellerCell(TransformerCell):
             self.assets['field_value_embedding'] = model_utils_py3.fully_connected(
                 self.assets['word_encodes'],
                 num_layers*layer_size,
+                dropout=self.assets['dropout'],
                 is_training=self.assets['training'],
                 scope="enc_projs")
             self.assets['field_query_embedding'] = tf.zeros_like(self.assets['field_value_embedding'])
@@ -325,254 +622,19 @@ class SpellerCell(TransformerCell):
 
         return outputs, state
 
-def train_speller(
-    speller_cell,
-    target_seqs,
-    spellin_embedding,
-    speller_matcher,
-    dropout,
-    training):
-    """
-    get the training loss of speller
-    args:
-        speller_cell: speller cell
-        target_seqs: batch_size x dec_seq_length
-        spellin_embedding: input embedding for spelling
-        speller_encoder: transformer encoder
-        speller_matcher: matcher module
-        dropout: dropout ratio
-    """
-    with tf.variable_scope("train_speller"):
 
-        batch_size = tf.shape(target_seqs)[0]
+""" Optimizers """
 
-        initial_state = (None, tf.zeros([batch_size], dtype=tf.int32))
-        inputs = tf.nn.embedding_lookup(
-            spellin_embedding,
-            tf.pad(target_seqs, [[0,0],[1,0]]))
-        target_seqs = tf.pad(target_seqs, [[0,0],[0,1]])
-        decMasks = tf.not_equal(target_seqs, 0)
-        decMasks = tf.logical_or(decMasks, tf.pad(tf.not_equal(target_seqs, 0), [[0,0],[1,0]])[:,:-1])
-        outputs, state = speller_cell(inputs, initial_state)
-        _, valid_outputs = tf.dynamic_partition(
-            outputs, tf.cast(decMasks, tf.int32), 2)
-        valid_target_seqs = tf.boolean_mask(target_seqs, decMasks)
-        valid_logits = speller_matcher(valid_outputs, spellin_embedding,
-                                       dropout=dropout, training=training)
-        valid_losses = tf.nn.sparse_softmax_cross_entropy_with_logits(
-            labels=valid_target_seqs,
-            logits=valid_logits)
-        loss = tf.cond(
-            tf.greater(tf.size(valid_losses), 0),
-            lambda: tf.reduce_mean(valid_losses),
-            lambda: tf.zeros([]))
+class MyAdamOptimizer(tf.train.AdamOptimizer):
+    def __init__(self, learning_rate=0.001, beta1=0.9, beta1_t=None, beta2=0.999, epsilon=1e-8,
+                 use_locking=False, name="Adam"):
+        """beta1 is the initial momentum, beta1_t is the dynamic momentum"""
+        tf.train.AdamOptimizer.__init__(
+            self, learning_rate=learning_rate, beta1=beta1, beta2=beta2, epsilon=epsilon,
+            use_locking=use_locking, name=name)
+        self.beta1_t = beta1_t
 
-    return loss
-
-
-"""parametric modules"""
-
-class Module(object):
-    """
-    maintains module parameters, scope and reuse state
-    """
-    def __init__(self, scope):
-        self.reuse = None
-        with tf.variable_scope(scope) as sc:
-            self.scope = sc
-
-class Embedder(Module):
-    """
-    Word embedder
-    embed seqs of chars into word embeddings
-    """
-    def __init__(self, input_embedding, layer_size, scope):
-        """
-        args:
-            input_embedding: num_embedding x embedding_dim
-            layer_size: size of layer
-        """
-        self.input_embedding = input_embedding
-        self.layer_size = layer_size
-        Module.__init__(self, scope)
-
-    def __call__(self, segmented_seqs, dropout=None, training=True):
-        """
-        args:
-            segmented_seqs: batch_size x word_length x char_length
-        returns:
-            word_embeds: batch_size x word_length x layer_size
-            word_masks: batch_size x word_length
-        """
-        with tf.variable_scope(self.scope, reuse=self.reuse):
-
-            batch_size = tf.shape(segmented_seqs)[0]
-            max_word_length = tf.shape(segmented_seqs)[1]
-            max_char_length = tf.shape(segmented_seqs)[2]
-            masks = tf.reduce_any(tf.not_equal(segmented_seqs, 0), axis=2)
-
-            char_embeds = tf.nn.embedding_lookup(self.input_embedding, segmented_seqs)
-            l0_embeds = model_utils_py3.fully_connected(
-                char_embeds,
-                self.layer_size,
-                activation_fn=tf.nn.relu,
-                is_training=training,
-                scope="l0_convs")
-            l1_embeds = model_utils_py3.convolution2d(
-                char_embeds,
-                [self.layer_size]*2,
-                [[1,2],[1,3]],
-                activation_fn=tf.nn.relu,
-                is_training=training,
-                scope="l1_convs")
-            char_embeds = tf.nn.max_pool(char_embeds, [1,1,2,1], [1,1,2,1], padding='SAME')
-            l2_embeds = model_utils_py3.convolution2d(
-                char_embeds,
-                [self.layer_size]*2,
-                [[1,2],[1,3]],
-                activation_fn=tf.nn.relu,
-                is_training=training,
-                scope="l2_convs")
-            concat_embeds = tf.concat(
-                [tf.reduce_max(l0_embeds, axis=2),
-                 tf.reduce_max(l1_embeds, axis=2),
-                 tf.reduce_max(l2_embeds, axis=2)],
-                axis=-1)
-            concat_embeds_normed = model_utils_py3.layer_norm(
-                concat_embeds, begin_norm_axis=-1, is_training=training)
-            word_embeds = model_utils_py3.fully_connected(
-                concat_embeds_normed,
-                self.layer_size,
-                dropout=dropout,
-                is_training=training,
-                scope="projs")
-            word_embeds_normed = model_utils_py3.layer_norm(
-                word_embeds, begin_norm_axis=-1, is_training=training)
-            word_embeds += model_utils_py3.MLP(
-                word_embeds_normed,
-                2,
-                self.layer_size,
-                self.layer_size,
-                dropout=dropout,
-                is_training=training,
-                scope="MLP")
-            word_embeds = model_utils_py3.layer_norm(
-                word_embeds, begin_norm_axis=-1,
-                is_training=training)
-
-            masksLeft = tf.pad(masks, [[0,0],[1,0]])[:,:-1]
-            masksRight = tf.pad(masks, [[0,0],[0,1]])[:,1:]
-            word_masks = tf.logical_or(masks, tf.logical_or(masksLeft, masksRight))
-
-        self.reuse = True
-
-        return word_embeds, word_masks
-
-class Encoder(Module):
-    """
-    Transformer encoder
-    """
-    def __init__(self, layer_size, num_layers, num_heads, scope):
-        """
-        args:
-            layer_size: size of layer
-            num_layers: num of layers
-            num_heads: num of attention heads
-        """
-        self.layer_size = layer_size
-        self.num_layers = num_layers
-        self.num_heads = num_heads
-        Module.__init__(self, scope)
-
-    def __call__(self, features, attn_masks, extra_features=None, dropout=None, training=True):
-        """
-        args:
-            features: {
-                'field_query_embeds': batch_size x length x num_layers*layer_size,
-                'field_key_embeds': batch_size x length x num_layers*layer_size,
-                'field_value_embeds': batch_size x length x num_layers*layer_size,
-                'posit_embeds': batch_size x length x layer_size,
-                'token_embeds': batch_size x length x layer_size,
-                'masks': batch_size x length,
-                'querys': batch_size x length x num_layers*layer_size,
-                'keys': batch_size x length x num_layers*layer_size,
-                'values': batch_size x length x num_layers*layer_size,
-                'encodes': batch_size x length x layer_size
-            }
-            attn_masks, batch_size x length x (length+extra_length)
-        returns:
-            features
-        """
-        features = model_utils_py3.transformer(
-            features,
-            self.num_layers,
-            self.layer_size,
-            extra_features=extra_features,
-            num_heads=self.num_heads,
-            attn_masks=attn_masks,
-            dropout=dropout,
-            is_training=training,
-            reuse=self.reuse,
-            scope=self.scope)
-
-        self.reuse = True
-
-        return features
-
-class Matcher(Module):
-    """
-    Matcher to get the logits of output probs
-    """
-    def __init__(self, layer_size, has_copy, scope):
-        """
-        args:
-            layer_size: size of layer
-            has_copy: whether has copy mechanism
-        """
-        self.layer_size = layer_size
-        self.has_copy = has_copy
-        Module.__init__(self, scope)
-
-    def __call__(self, *args, dropout=None, training=True):
-        """
-        args:
-            encodes: batch_size x dim or batch_size x length x dim
-            token_embeds: num_candidates x dim or batch_size x num_candidates x dim
-            token_encodes: same shape as token_embeds, for copy
-        returns:
-            logits: batch_size x num_candidates or batch_size x length x num_candidates
-        """
-        if self.has_copy:
-            encodes, token_embeds, token_encodes = args[0], args[1], args[2]
-        else:
-            encodes, token_embeds = args[0], args[1]
-
-        with tf.variable_scope(self.scope, reuse=self.reuse):
-
-            encode_projs = model_utils_py3.GLU(
-                encodes,
-                self.layer_size,
-                dropout=dropout,
-                is_training=training,
-                scope="enc_projs")
-            encode_projs *= tf.sqrt(1.0/float(self.layer_size))
-            if self.has_copy:
-                token_projs = model_utils_py3.fully_connected(
-                    tf.concat([token_embeds, token_encodes], axis=-1),
-                    self.layer_size,
-                    is_training=training,
-                    scope="tok_projs")
-            else:
-                token_projs = model_utils_py3.fully_connected(
-                    token_embeds,
-                    self.layer_size,
-                    is_training=training,
-                    scope="tok_projs")
-
-            logits = tf.matmul(
-                encode_projs, token_projs, transpose_b=True)
-
-        self.reuse = True
-
-        return logits
-
+    def _prepare(self):
+        tf.train.AdamOptimizer._prepare(self)
+        if self.beta1_t != None:
+            self._beta1_t = self.beta1_t
