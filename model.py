@@ -709,10 +709,10 @@ class Model(object):
                 attn_matrix.append(attn_matrix_local)
 
             # get encodes
-            if tlevel > 0:
+            if tlevel > 0 and len(masked_feature_list) > 0:
                 masked_feature_list = encode_features(
                     word_encoder, masked_feature_list, attn_matrix, extra_feature_list)
-            if tlevel < max_target_level:
+            if tlevel < max_target_level and len(feature_list) > 0:
                 feature_list = encode_features(
                     word_encoder, feature_list, attn_matrix, extra_feature_list)
                 extra_feature_list.extend(feature_list)
