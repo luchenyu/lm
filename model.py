@@ -452,11 +452,11 @@ class Model(object):
 
             # word_gen_loss
             if not schema[i]['limited_vocab']:
-                speller_cell.feed_word_encodes(pick_word_encodes_ref)
                 word_gen_loss_ref = get_speller_loss(
-                    speller_cell,
+                    pick_word_encodes_ref,
                     pick_segmented_seqs_ref,
                     spellin_embedding,
+                    speller_cell,
                     speller_matcher)
             else:
                 word_gen_loss_ref = tf.zeros([])
@@ -852,11 +852,11 @@ class Model(object):
 
                 # word_gen_loss
                 if not schema[i]['limited_vocab']:
-                    speller_cell.feed_word_encodes(pick_word_encodes_ref)
                     word_gen_loss_ref = get_speller_loss(
-                        speller_cell,
+                        pick_word_encodes_ref,
                         pick_segmented_seqs_ref,
                         spellin_embedding,
+                        speller_cell,
                         speller_matcher)
                 else:
                     word_gen_loss_ref = tf.zeros([])

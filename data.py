@@ -69,8 +69,12 @@ class Dataset(object):
             text = text.numpy().decode('utf-8').strip()
             pieces = text.split(self.field_delim)
             def _tokenize(i, piece):
-                if self.schema[i]['type'] == 'sequence':
-                    paras = ' \t '.join(re.split(para_delim, piece.strip(' \t')))
+                piece = piece.strip()
+                if piece == '':
+                    seqs = []
+                    segs = []
+                elif self.schema[i]['type'] == 'sequence':
+                    paras = ' \t '.join(re.split(para_delim, piece))
                     words = ['\t']+re.split(word_delim, paras)+['\t']
                     # random sampling if too long
                     max_seq_length = run_config['data'][i].get('max_seq_length')
@@ -89,11 +93,11 @@ class Dataset(object):
                     # tokenize
                     token_vocab = self.schema[i].get('token_vocab')
                     if self.schema[i]['limited_vocab']:
-                        tokens = [piece.strip()]
+                        tokens = [piece]
                         seqs = token_vocab.doc2idx(tokens)
                         segs = []
                     else:
-                        tokens = [piece.strip()]
+                        tokens = [piece]
                         seqs, segs = data_utils_py3.tokens_to_seqs_segs(tokens, self.char_vocab)
                 else:
                     raise NameError('wrong data type!')

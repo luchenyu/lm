@@ -222,31 +222,32 @@ def encode_features(
     return feature_list
 
 def get_speller_loss(
-    speller_cell,
+    word_encodes,
     target_seqs,
     spellin_embedding,
+    speller_cell,
     speller_matcher):
     """
     get the loss of speller
     args:
-        speller_cell: speller cell
+        word_encodes: batch_size x word_layer_size
         target_seqs: batch_size x dec_seq_length
         spellin_embedding: input embedding for spelling
-        speller_encoder: transformer encoder
+        speller_cell: speller cell
         speller_matcher: matcher module
     """
     with tf.variable_scope("train_speller"):
 
         batch_size = tf.shape(target_seqs)[0]
 
-        initial_state = (None, tf.zeros([batch_size], dtype=tf.int32))
+        initial_state = (word_encodes, None, None, None, None, None)
         inputs = tf.nn.embedding_lookup(
             spellin_embedding,
             tf.pad(target_seqs, [[0,0],[1,0]]))
+        outputs, state = speller_cell(inputs, initial_state)
         target_seqs = tf.pad(target_seqs, [[0,0],[0,1]])
         decMasks = tf.not_equal(target_seqs, 0)
         decMasks = tf.logical_or(decMasks, tf.pad(tf.not_equal(target_seqs, 0), [[0,0],[1,0]])[:,:-1])
-        outputs, state = speller_cell(inputs, initial_state)
         _, valid_outputs = tf.dynamic_partition(
             outputs, tf.cast(decMasks, tf.int32), 2)
         valid_target_seqs = tf.boolean_mask(target_seqs, decMasks)
@@ -466,58 +467,84 @@ class Matcher(Module):
 
 """Cells"""
 
-class TransformerCell(model_utils_py3.GeneralCell):
+class GeneralCell(object):
+    """
+    General Cell that defines the interface
+    dummy class
+    """ 
+
+    def __init__(self,
+                 scope,
+                 **kwargs):
+        """
+        args:
+            cell_fn takes assets, inputs, state then produce outputs, state
+            kwargs takes all the args and put in self.assets
+        """
+        self.assets = kwargs
+        self.reuse = None
+        with tf.variable_scope(scope) as sc:
+            self.scope=sc
+
+    def __call__(self,
+                 inputs,
+                 state):
+        """
+        args:
+            inputs: batch_size x input_dim or batch_size x length x input_dim
+            state:
+        """
+        with tf.variable_scope(self.scope, reuse=self.reuse):
+            outputs, state = inputs, state
+        self.reuse = True
+        return outputs, state
+
+class TransformerCell(GeneralCell):
     """Cell that wraps transformer"""
     def __init__(self,
                  scope,
                  posit_size,
-                 field_query_embedding,
-                 field_key_embedding,
-                 field_value_embedding,
                  encoder,
                  dropout=None,
                  training=True):
         """
         args:
             posit_size
-            field_query_embedding: batch_size x num_layers*dim
-            field_key_embedding: batch_size x num_layers*dim
-            field_value_embedding: batch_size x num_layers*dim
             encoder: module
             dropout
             training
         """
 
-        model_utils_py3.GeneralCell.__init__(self,
-                                             scope,
-                                             posit_size=posit_size,
-                                             field_query_embedding=field_query_embedding,
-                                             field_key_embedding=field_key_embedding,
-                                             field_value_embedding=field_value_embedding,
-                                             encoder=encoder,
-                                             dropout=dropout,
-                                             training=training)
+        GeneralCell.__init__(self,
+                             scope,
+                             posit_size=posit_size,
+                             encoder=encoder,
+                             dropout=dropout,
+                             training=training)
 
     def __call__(self,
                  inputs,
                  state):
         """
         fn that defines attn_cell
-        inputs: batch_size x input_dim or batch_size x length x input_dim
+        inputs: batch_size x token_size or batch_size x length x token_size
         state:
-            features: {
+            field_query_embedding: batch_size x num_layers*layer_size
+            field_key_embedding: batch_size x num_layers*layer_size
+            field_value_embedding: batch_size x num_layers*layer_size
+            dec_features: {
                 'field_query_embeds': batch_size x length x num_layers*layer_size,
                 'field_key_embeds': batch_size x length x num_layers*layer_size,
                 'field_value_embeds': batch_size x length x num_layers*layer_size,
-                'posit_embeds': batch_size x length x layer_size,
-                'token_embeds': batch_size x length x layer_size,
+                'posit_embeds': batch_size x length x posit_size,
+                'token_embeds': batch_size x length x token_size,
                 'masks': batch_size x length,
                 'querys': batch_size x length x num_layers*layer_size,
                 'keys': batch_size x length x num_layers*layer_size,
                 'values': batch_size x length x num_layers*layer_size,
                 'encodes': batch_size x length x layer_size
             }
-            current_idx: batch_size
+            enc_features
         """
         with tf.variable_scope(self.scope, reuse=self.reuse):
 
@@ -527,17 +554,24 @@ class TransformerCell(model_utils_py3.GeneralCell):
                 to_squeeze = True
                 inputs = tf.expand_dims(inputs, axis=1)
             length = tf.shape(inputs)[1]
-            extra_features = state[0]
-            current_idx = state[1]
+
+            field_query_embedding, field_key_embedding, field_value_embedding = state[0], state[1], state[2]
+            dec_features, enc_features = state[3], state[4]
+            if dec_features is None:
+                current_idx = 0
+            else:
+                current_idx = tf.shape(dec_features['token_embeds'])[1]
+
+            # prepare features
             features = {}
             features['field_query_embeds'] = tf.tile(
-                tf.expand_dims(self.assets['field_query_embedding'], axis=1),
+                tf.expand_dims(field_query_embedding, axis=1),
                 [1, 2*length, 1])
             features['field_key_embeds'] = tf.tile(
-                tf.expand_dims(self.assets['field_key_embedding'], axis=1),
+                tf.expand_dims(field_key_embedding, axis=1),
                 [1, 2*length, 1])
             features['field_value_embeds'] = tf.tile(
-                tf.expand_dims(self.assets['field_value_embedding'], axis=1),
+                tf.expand_dims(field_value_embedding, axis=1),
                 [1, 2*length, 1])
             features['posit_embeds'] = model_utils_py3.embed_position(
                 tf.expand_dims(tf.concat([tf.range(length), tf.range(1, length+1)], axis=0), axis=0) + \
@@ -545,6 +579,17 @@ class TransformerCell(model_utils_py3.GeneralCell):
                 self.assets['posit_size'])
             features['token_embeds'] = tf.concat([inputs, tf.zeros_like(inputs)], axis=1)
             features['masks'] = tf.pad(tf.reduce_any(tf.not_equal(inputs, 0.0), axis=-1), [[0,0], [0,length]])
+
+            # prepare extra_features
+            extra_features = []
+            if not dec_features is None:
+                extra_features.append(dec_features)
+            if not enc_features is None:
+                extra_features.append(enc_features)
+            if len(extra_features) > 0:
+                extra_features = model_utils_py3.concat_features(extra_features)
+            else:
+                extra_features = None
 
             # prepare masks
             attn_masks = tf.sequence_mask(
@@ -556,67 +601,70 @@ class TransformerCell(model_utils_py3.GeneralCell):
                     [attn_masks, tf.tile(tf.expand_dims(extra_features['masks'], axis=1), [1, 2*length, 1])],
                     axis=2)
 
-            features = self.assets['encoder'](features, attn_masks,
-                                         extra_features=extra_features)
+            features = self.assets['encoder'](features, attn_masks, extra_features=extra_features)
             input_features, output_features = model_utils_py3.split_features(features, 2)
             outputs = output_features['encodes']
             if to_squeeze:
                 outputs = tf.squeeze(outputs, axis=[1])
-            if extra_features is None:
-                new_features = input_features
+            if dec_features is None:
+                dec_features = input_features
             else:
-                new_features = model_utils_py3.concat_features([extra_features, input_features])
-            state = (new_features, current_idx+length)
+                dec_features = model_utils_py3.concat_features([dec_features, input_features])
+            state = (field_query_embedding, field_key_embedding, field_value_embedding, dec_features, enc_features)
 
-        outputs, state = model_utils_py3.GeneralCell.__call__(self, outputs, state)
+        outputs, state = GeneralCell.__call__(self, outputs, state)
 
         return outputs, state
 
 class SpellerCell(TransformerCell):
     """wraps a speller"""
-    def __init__(self,
-                 scope,
-                 posit_size,
-                 encoder,
-                 dropout=None,
-                 training=True):
-        """
-        args:
-            word_encodes: batch_size x dim
-        """
-
-        model_utils_py3.GeneralCell.__init__(self,
-                                             scope,
-                                             posit_size=posit_size,
-                                             encoder=encoder,
-                                             dropout=dropout,
-                                             training=training)
-
-    def feed_word_encodes(self, word_encodes):
-        """
-        feed word_encodes
-        """
-        self.assets['word_encodes'] = word_encodes
-
     def __call__(self,
                  inputs,
                  state):
         """
         first map from word_encodes to field_value_embedding
+        inputs: batch_size x token_size or batch_size x length x token_size
+        state:
+            word_encodes: batch_size x word_layer_size
+            field_query_embedding: batch_size x num_layers*layer_size
+            field_key_embedding: batch_size x num_layers*layer_size
+            field_value_embedding: batch_size x num_layers*layer_size
+            dec_features: {
+                'field_query_embeds': batch_size x length x num_layers*layer_size,
+                'field_key_embeds': batch_size x length x num_layers*layer_size,
+                'field_value_embeds': batch_size x length x num_layers*layer_size,
+                'posit_embeds': batch_size x length x posit_size,
+                'token_embeds': batch_size x length x token_size,
+                'masks': batch_size x length,
+                'querys': batch_size x length x num_layers*layer_size,
+                'keys': batch_size x length x num_layers*layer_size,
+                'values': batch_size x length x num_layers*layer_size,
+                'encodes': batch_size x length x layer_size
+            }
+            enc_features
         """
         with tf.variable_scope(self.scope, reuse=self.reuse):
-            num_layers = self.assets['encoder'].num_layers
-            layer_size = self.assets['encoder'].layer_size
-            self.assets['field_value_embedding'] = model_utils_py3.fully_connected(
-                self.assets['word_encodes'],
-                num_layers*layer_size,
-                dropout=self.assets['dropout'],
-                is_training=self.assets['training'],
-                scope="enc_projs")
-            self.assets['field_query_embedding'] = tf.zeros_like(self.assets['field_value_embedding'])
-            self.assets['field_key_embedding'] = tf.zeros_like(self.assets['field_value_embedding'])
+
+            word_encodes = state[0]
+            field_value_embedding = state[3]
+            state = state[1:]
+            if field_value_embedding is None:
+                num_layers = self.assets['encoder'].num_layers
+                layer_size = self.assets['encoder'].layer_size
+                field_value_embedding = model_utils_py3.fully_connected(
+                    word_encodes,
+                    num_layers*layer_size,
+                    dropout=self.assets['dropout'],
+                    is_training=self.assets['training'],
+                    scope="enc_projs")
+                field_query_embedding = tf.zeros_like(field_value_embedding)
+                field_key_embedding = tf.zeros_like(field_value_embedding)
+                state = (
+                    field_query_embedding, field_key_embedding, field_value_embedding,
+                    state[3], state[4])
 
         outputs, state = TransformerCell.__call__(self, inputs, state)
+        state = tuple([word_encodes] + list(state))
 
         return outputs, state
 
