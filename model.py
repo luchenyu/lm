@@ -492,7 +492,7 @@ class Model(object):
         optimizer = get_optimizer(
             params['schedule'], global_step, run_config.get('max_lr'), params['num_steps'], run_config.get('pct_start'))
         if self.isFreeze:
-            var_list = [field_embedding]
+            var_list = [field_query_embedding, field_key_embedding, field_value_embedding]
         else:
             var_list = None
         train_op = model_utils_py3.optimize_loss(
