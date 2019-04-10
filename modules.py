@@ -775,12 +775,15 @@ class Embedder(Module):
             word_masks = tf.reduce_any(tf.not_equal(segmented_seqs, 0), axis=2)
 
             char_embeds = tf.nn.embedding_lookup(self.input_embedding, segmented_seqs)
+            char_masks = tf.reduce_any(tf.not_equal(char_embeds, 0.0), axis=-1, keepdims=True)
+            char_masks = tf.cast(char_masks, tf.float32)
             l0_embeds = model_utils_py3.fully_connected(
                 char_embeds,
                 self.layer_size,
                 activation_fn=tf.nn.relu,
                 is_training=self.training,
                 scope="l0_convs")
+            l0_embeds *= char_masks
             l1_embeds = model_utils_py3.convolution2d(
                 char_embeds,
                 [self.layer_size]*2,
@@ -788,7 +791,10 @@ class Embedder(Module):
                 activation_fn=tf.nn.relu,
                 is_training=self.training,
                 scope="l1_convs")
+            l1_embeds *= char_masks
             char_embeds = tf.nn.max_pool(char_embeds, [1,1,2,1], [1,1,2,1], padding='SAME')
+            char_masks = tf.reduce_any(tf.not_equal(char_embeds, 0.0), axis=-1, keepdims=True)
+            char_masks = tf.cast(char_masks, tf.float32)
             l2_embeds = model_utils_py3.convolution2d(
                 char_embeds,
                 [self.layer_size]*2,
@@ -796,6 +802,7 @@ class Embedder(Module):
                 activation_fn=tf.nn.relu,
                 is_training=self.training,
                 scope="l2_convs")
+            l2_embeds *= char_masks
             concat_embeds = tf.concat(
                 [tf.reduce_max(l0_embeds, axis=2),
                  tf.reduce_max(l1_embeds, axis=2),
