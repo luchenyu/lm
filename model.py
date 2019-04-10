@@ -58,13 +58,14 @@ class LRFinderHook(tf.train.SessionRunHook):
 """ lm model """
 
 class Model(object):
-    def __init__(self, model_config, train_dir, pretrain_dir=None):
+    def __init__(self, model_config, char_vocab, train_dir, pretrain_dir=None):
         """
         args:
             model_config: {'char_vocab_size': int, 'char_vocab_dim': int, 'char_vocab_emb': np.array,
                 'layer_size': int, 'num_layers': int, 'num_heads': int}
         """
         self.model_config = model_config
+        self.char_vocab = char_vocab
         self.train_dir = train_dir
         self.warm_start_from = None
         self.isFreeze = False
@@ -169,7 +170,7 @@ class Model(object):
         model_config = self.model_config
         input_embedding, spellin_embedding, \
             field_query_embedding, field_key_embedding, field_value_embedding = get_embeddings(
-            model_config['char_vocab_size'], model_config['char_vocab_dim'], model_config.get('char_vocab_emb'),
+            model_config['char_vocab_size'], model_config['char_vocab_dim'], self.char_vocab.embedding_init,
             model_config['num_layers'], model_config['layer_size'], training=True)
         if run_config.get('dropout') != None:
             embedder_dropout = 0.5*run_config.get('dropout')
@@ -202,7 +203,6 @@ class Model(object):
 
             seqs = piece['seqs']
             segs = piece['segs']
-            piece['features'] = {}
 
             # segment
             token_vocab = schema[i].get('token_vocab')
@@ -229,7 +229,8 @@ class Model(object):
             if token_vocab is None:
                 piece['token_length'] = tf.shape(segmented_seqs_ref)[2]
             else:
-                piece['token_length'] = tf.maximum(tf.shape(segmented_seqs_ref)[2], tf.shape(piece['token_char_ids'])[1])
+                piece['token_length'] = tf.maximum(
+                    tf.shape(segmented_seqs_ref)[2], tf.shape(piece['token_char_ids'])[1])
 
             # embed words
             if not token_vocab is None:
@@ -247,13 +248,13 @@ class Model(object):
             piece['word_masks'] = word_masks_ref
 
             # field_encodes and posit_embeds
-            piece['features']['field_query_embeds'] = tf.tile(
+            piece['field_query_embeds'] = tf.tile(
                 tf.nn.embedding_lookup(field_query_embedding, [[schema[i]['field_id']+1,]]),# field embeds 0 is reserved
                 [batch_size, seq_length, 1])
-            piece['features']['field_key_embeds'] = tf.tile(
+            piece['field_key_embeds'] = tf.tile(
                 tf.nn.embedding_lookup(field_key_embedding, [[schema[i]['field_id']+1,]]),# field embeds 0 is reserved
                 [batch_size, seq_length, 1])
-            piece['features']['field_value_embeds'] = tf.tile(
+            piece['field_value_embeds'] = tf.tile(
                 tf.nn.embedding_lookup(field_value_embedding, [[schema[i]['field_id']+1,]]),# field embeds 0 is reserved
                 [batch_size, seq_length, 1])
             if schema[i]['type'] == 'sequence':
@@ -263,7 +264,7 @@ class Model(object):
                     posit_size)
             else:
                 posit_embeds = tf.zeros([batch_size, seq_length, posit_size])
-            piece['features']['posit_embeds'] = posit_embeds
+            piece['posit_embeds'] = posit_embeds
 
             # picking tokens
             if run_config['data'][schema[i]['field_id']]['target_level'] > 0:
@@ -279,9 +280,33 @@ class Model(object):
             pick_masks_ref = tf.less(tf.random_uniform([batch_size, seq_length]), pick_prob)
             pick_masks_ref = tf.logical_and(pick_masks_ref, word_masks_ref)
             piece['pick_masks'] = pick_masks_ref
-            piece['features']['masks'] = tf.logical_and(piece['word_masks'], tf.logical_not(piece['pick_masks']))
-            piece['features']['token_embeds'] = piece['word_embeds'] * \
-                tf.cast(tf.expand_dims(piece['features']['masks'], axis=2), tf.float32)
+
+            # tfstruct
+            piece['tfstruct'] = model_utils_py3.TransformerStruct(
+                field_query_embeds=piece['field_query_embeds'],
+                field_key_embeds=piece['field_key_embeds'],
+                field_value_embeds=piece['field_value_embeds'],
+                posit_embeds=piece['posit_embeds'],
+                token_embeds=piece['word_embeds'],
+                masks=piece['word_masks'],
+                querys=None,
+                keys=None,
+                values=None,
+                encodes=None,
+            )
+            valid_masks = tf.logical_and(piece['word_masks'], tf.logical_not(piece['pick_masks']))
+            piece['masked_tfstruct'] = model_utils_py3.TransformerStruct(
+                field_query_embeds=piece['field_query_embeds'],
+                field_key_embeds=piece['field_key_embeds'],
+                field_value_embeds=piece['field_value_embeds'],
+                posit_embeds=piece['posit_embeds'],
+                token_embeds=piece['word_embeds'] * tf.cast(tf.expand_dims(valid_masks, axis=2), tf.float32),
+                masks=valid_masks,
+                querys=None,
+                keys=None,
+                values=None,
+                encodes=None,
+            )
 
         # pad segmented_seqs and token_ids to same token_length
         max_token_length = tf.reduce_max(tf.stack([features[i]['token_length'] for i in features], axis=0))
@@ -295,15 +320,19 @@ class Model(object):
                     features[i]['token_char_ids'],
                     [[0,0],[0,max_token_length-tf.shape(features[i]['token_char_ids'])[1]]])
 
-        # add extra sample-level field
-        global_feature = {
-            'field_query_embeds': tf.tile(tf.nn.embedding_lookup(field_query_embedding, [[0,]]), [batch_size, 1, 1]),
-            'field_key_embeds': tf.tile(tf.nn.embedding_lookup(field_key_embedding, [[0,]]), [batch_size, 1, 1]),
-            'field_value_embeds': tf.tile(tf.nn.embedding_lookup(field_value_embedding, [[0,]]), [batch_size, 1, 1]),
-            'posit_embeds': tf.zeros([batch_size, 1, posit_size]),
-            'token_embeds': tf.zeros([batch_size, 1, model_config['layer_size']]),
-            'masks': tf.ones([batch_size, 1], dtype=tf.bool)
-        }
+        # add extra sample-level tfstruct
+        global_tfstruct = model_utils_py3.TransformerStruct(
+            field_query_embeds=tf.tile(tf.nn.embedding_lookup(field_query_embedding, [[0,]]), [batch_size, 1, 1]),
+            field_key_embeds=tf.tile(tf.nn.embedding_lookup(field_key_embedding, [[0,]]), [batch_size, 1, 1]),
+            field_value_embeds=tf.tile(tf.nn.embedding_lookup(field_value_embedding, [[0,]]), [batch_size, 1, 1]),
+            posit_embeds=tf.zeros([batch_size, 1, posit_size]),
+            token_embeds=tf.zeros([batch_size, 1, model_config['layer_size']]),
+            masks=tf.zeros([batch_size, 1], dtype=tf.bool),
+            querys=None,
+            keys=None,
+            values=None,
+            encodes=None,
+        )
 
         # prepare attn_matrix
         attn_matrix = []
@@ -325,8 +354,11 @@ class Model(object):
             attn_matrix.append(attn_matrix_local)
 
         # get encodes
-        feature_list = [global_feature] + [features[i]['features'] for i in features]
-        feature_list = encode_features(word_encoder, feature_list, attn_matrix)
+        tfstruct_list = [global_tfstruct] + [features[i]['masked_tfstruct'] for i in features]
+        tfstruct_list = encode_tfstructs(word_encoder, tfstruct_list, attn_matrix)
+        global_tfstruct = tfstruct_list[0]
+        for i in features:
+            features[i]['masked_tfstruct'] = tfstruct_list[i+1]
 
         # get the loss of each piece
         metrics = {}
@@ -339,7 +371,7 @@ class Model(object):
                 features[i]['segmented_seqs'],
                 features[i]['pick_masks'])
             _, pick_word_encodes_ref = tf.dynamic_partition(
-                features[i]['features']['encodes'], tf.cast(features[i]['pick_masks'], tf.int32), 2)
+                features[i]['masked_tfstruct'].encodes, tf.cast(features[i]['pick_masks'], tf.int32), 2)
             num_pick_words = tf.shape(pick_word_encodes_ref)[0]
 
             # form candidates
@@ -402,8 +434,8 @@ class Model(object):
                 for j in features:
                     if schema[j]['field_id'] in schema[i]['copy_from']:
                         copy_from_segmented_seqs.append(features[j]['segmented_seqs'])
-                        copy_from_final_encodes.append(features[j]['features']['encodes'])
-                        copy_from_valid_masks.append(features[j]['features']['masks'])
+                        copy_from_final_encodes.append(features[j]['masked_tfstruct'].encodes)
+                        copy_from_valid_masks.append(features[j]['masked_tfstruct'].masks)
                         copy_from_pick_masks.append(features[j]['pick_masks'])
                 # first we get the matrix indicates whether x copy to y
                 copy_from_segmented_seqs = tf.concat(copy_from_segmented_seqs, axis=1)
@@ -540,7 +572,7 @@ class Model(object):
         model_config = self.model_config
         input_embedding, spellin_embedding, \
             field_query_embedding, field_key_embedding, field_value_embedding = get_embeddings(
-            model_config['char_vocab_size'], model_config['char_vocab_dim'], model_config.get('char_vocab_emb'),
+            model_config['char_vocab_size'], model_config['char_vocab_dim'], self.char_vocab.embedding_init,
             model_config['num_layers'], model_config['layer_size'], training=False)
         word_embedder = Embedder(
             input_embedding, model_config['layer_size'],
@@ -570,9 +602,6 @@ class Model(object):
 
             seqs = piece['seqs']
             segs = piece['segs']
-            piece['features'] = {}
-            if run_config['data'][schema[i]['field_id']]['target_level'] > 0:
-                piece['masked_features'] = {}
 
             # segment
             token_vocab = schema[i].get('token_vocab')
@@ -615,17 +644,15 @@ class Model(object):
                     segmented_seqs_ref)
             piece['word_embeds'] = word_embeds_ref
             piece['word_masks'] = word_masks_ref
-            piece['features']['masks'] = piece['word_masks']
-            piece['features']['token_embeds'] = piece['word_embeds']
 
             # field_encodes and posit_embeds
-            piece['features']['field_query_embeds'] = tf.tile(
+            piece['field_query_embeds'] = tf.tile(
                 tf.nn.embedding_lookup(field_query_embedding, [[schema[i]['field_id']+1,]]),# field embeds 0 is reserved
                 [batch_size, seq_length, 1])
-            piece['features']['field_key_embeds'] = tf.tile(
+            piece['field_key_embeds'] = tf.tile(
                 tf.nn.embedding_lookup(field_key_embedding, [[schema[i]['field_id']+1,]]),# field embeds 0 is reserved
                 [batch_size, seq_length, 1])
-            piece['features']['field_value_embeds'] = tf.tile(
+            piece['field_value_embeds'] = tf.tile(
                 tf.nn.embedding_lookup(field_value_embedding, [[schema[i]['field_id']+1,]]),# field embeds 0 is reserved
                 [batch_size, seq_length, 1])
             if schema[i]['type'] == 'sequence':
@@ -635,22 +662,43 @@ class Model(object):
                     posit_size)
             else:
                 posit_embeds = tf.zeros([batch_size, seq_length, posit_size])
-            piece['features']['posit_embeds'] = posit_embeds
+            piece['posit_embeds'] = posit_embeds
 
             # picking tokens
-            if run_config['data'][schema[i]['field_id']]['target_level'] > 0:
-                if schema[i]['type'] == 'sequence':
-                    pick_prob = 0.2
-                elif schema[i]['type'] == 'class':
-                    pick_prob = 1.0
-                pick_masks_ref = tf.less(tf.random_uniform([batch_size, seq_length]), pick_prob)
-                pick_masks_ref = tf.logical_and(pick_masks_ref, word_masks_ref)
-                piece['pick_masks'] = pick_masks_ref
-                piece['masked_features']['masks'] = tf.logical_and(piece['word_masks'], tf.logical_not(piece['pick_masks']))
-                piece['masked_features']['token_embeds'] = piece['word_embeds'] * \
-                    tf.cast(tf.expand_dims(piece['masked_features']['masks'], axis=2), tf.float32)
-                for key in ['field_query_embeds', 'field_key_embeds', 'field_value_embeds', 'posit_embeds']:
-                    piece['masked_features'][key] = piece['features'][key]
+            if schema[i]['type'] == 'sequence':
+                pick_prob = 0.2
+            elif schema[i]['type'] == 'class':
+                pick_prob = 1.0
+            pick_masks_ref = tf.less(tf.random_uniform([batch_size, seq_length]), pick_prob)
+            pick_masks_ref = tf.logical_and(pick_masks_ref, word_masks_ref)
+            piece['pick_masks'] = pick_masks_ref
+
+            # tfstruct
+            piece['tfstruct'] = model_utils_py3.TransformerStruct(
+                field_query_embeds=piece['field_query_embeds'],
+                field_key_embeds=piece['field_key_embeds'],
+                field_value_embeds=piece['field_value_embeds'],
+                posit_embeds=piece['posit_embeds'],
+                token_embeds=piece['word_embeds'],
+                masks=piece['word_masks'],
+                querys=None,
+                keys=None,
+                values=None,
+                encodes=None,
+            )
+            valid_masks = tf.logical_and(piece['word_masks'], tf.logical_not(piece['pick_masks']))
+            piece['masked_tfstruct'] = model_utils_py3.TransformerStruct(
+                field_query_embeds=piece['field_query_embeds'],
+                field_key_embeds=piece['field_key_embeds'],
+                field_value_embeds=piece['field_value_embeds'],
+                posit_embeds=piece['posit_embeds'],
+                token_embeds=piece['word_embeds'] * tf.cast(tf.expand_dims(valid_masks, axis=2), tf.float32),
+                masks=valid_masks,
+                querys=None,
+                keys=None,
+                values=None,
+                encodes=None,
+            )
 
         # pad segmented_seqs and token_ids to same token_length
         max_token_length = tf.reduce_max(tf.stack([features[i]['token_length'] for i in features], axis=0))
@@ -664,29 +712,32 @@ class Model(object):
                     features[i]['token_char_ids'],
                     [[0,0],[0,max_token_length-tf.shape(features[i]['token_char_ids'])[1]]])
 
-        # add extra sample-level field
-        global_feature = {
-            'field_query_embeds': tf.tile(tf.nn.embedding_lookup(field_query_embedding, [[0,]]), [batch_size, 1, 1]),
-            'field_key_embeds': tf.tile(tf.nn.embedding_lookup(field_key_embedding, [[0,]]), [batch_size, 1, 1]),
-            'field_value_embeds': tf.tile(tf.nn.embedding_lookup(field_value_embedding, [[0,]]), [batch_size, 1, 1]),
-            'posit_embeds': tf.zeros([batch_size, 1, posit_size]),
-            'token_embeds': tf.zeros([batch_size, 1, model_config['layer_size']]),
-            'masks': tf.ones([batch_size, 1], dtype=tf.bool)
-        }
+        # add extra sample-level tfstruct
+        global_tfstruct = model_utils_py3.TransformerStruct(
+            field_query_embeds=tf.tile(tf.nn.embedding_lookup(field_query_embedding, [[0,]]), [batch_size, 1, 1]),
+            field_key_embeds=tf.tile(tf.nn.embedding_lookup(field_key_embedding, [[0,]]), [batch_size, 1, 1]),
+            field_value_embeds=tf.tile(tf.nn.embedding_lookup(field_value_embedding, [[0,]]), [batch_size, 1, 1]),
+            posit_embeds=tf.zeros([batch_size, 1, posit_size]),
+            token_embeds=tf.zeros([batch_size, 1, model_config['layer_size']]),
+            masks=tf.zeros([batch_size, 1], dtype=tf.bool),
+            querys=None,
+            keys=None,
+            values=None,
+            encodes=None,
+        )
 
         # loop for target_level
-        extra_feature_list = []
+        extra_tfstruct_list = []
         extra_feature_id_list = []
         for tlevel in range(max_target_level+1):
 
-            # gather features
-            feature_list, masked_feature_list, feature_id_list = [], [], []
+            # gather tfstructs
+            tfstruct_list, masked_tfstruct_list, feature_id_list = [], [], []
             for i in features:
                 if run_config['data'][schema[i]['field_id']]['target_level'] == tlevel:
                     feature_id_list.append(i)
-                    feature_list.append(features[i]['features'])
-                    if tlevel > 0:
-                        masked_feature_list.append(features[i]['masked_features'])
+                    tfstruct_list.append(features[i]['tfstruct'])
+                    masked_tfstruct_list.append(features[i]['masked_tfstruct'])
 
             # prepare attn_matrix
             attn_matrix = []
@@ -709,162 +760,165 @@ class Model(object):
                 attn_matrix.append(attn_matrix_local)
 
             # get encodes
-            if tlevel > 0 and len(masked_feature_list) > 0:
-                masked_feature_list = encode_features(
-                    word_encoder, masked_feature_list, attn_matrix, extra_feature_list)
-            if tlevel < max_target_level and len(feature_list) > 0:
-                feature_list = encode_features(
-                    word_encoder, feature_list, attn_matrix, extra_feature_list)
-                extra_feature_list.extend(feature_list)
-                extra_feature_id_list.extend(feature_id_list)
+            if len(feature_id_list) > 0:
+                masked_tfstruct_list = encode_tfstructs(
+                    word_encoder, masked_tfstruct_list, attn_matrix, extra_tfstruct_list)
+                for i, feature_id in enumerate(feature_id_list):
+                    features[feature_id]['masked_tfstruct'] = masked_tfstruct_list[i]
+                if tlevel < max_target_level:
+                    tfstruct_list = encode_tfstructs(
+                        word_encoder, tfstruct_list, attn_matrix, extra_tfstruct_list)
+                    for i, feature_id in enumerate(feature_id_list):
+                        features[feature_id]['tfstruct'] = tfstruct_list[i]
+                    extra_feature_id_list.extend(feature_id_list)
+                    extra_tfstruct_list.extend(tfstruct_list)
 
         # get the loss of each piece
         metrics = {}
-        target_loss_list = []
+        loss_list = []
         for i in features:
 
-            if run_config['data'][schema[i]['field_id']]['target_level'] > 0:
+            token_char_ids = features[i].get('token_char_ids')
 
-                token_char_ids = features[i].get('token_char_ids')
+            # picked tokens
+            pick_segmented_seqs_ref = tf.boolean_mask(
+                features[i]['segmented_seqs'],
+                features[i]['pick_masks'])
+            _, pick_word_encodes_ref = tf.dynamic_partition(
+                features[i]['masked_tfstruct'].encodes, tf.cast(features[i]['pick_masks'], tf.int32), 2)
+            num_pick_words = tf.shape(pick_word_encodes_ref)[0]
 
-                # picked tokens
-                pick_segmented_seqs_ref = tf.boolean_mask(
-                    features[i]['segmented_seqs'],
-                    features[i]['pick_masks'])
-                _, pick_word_encodes_ref = tf.dynamic_partition(
-                    features[i]['masked_features']['encodes'], tf.cast(features[i]['pick_masks'], tf.int32), 2)
-                num_pick_words = tf.shape(pick_word_encodes_ref)[0]
-                
-                # form candidates
-                if schema[i]['limited_vocab']:
-                    candidate_segmented_seqs = token_char_ids[1:]
-                    candidate_word_embeds = features[i]['candidate_word_embeds']
-                    match_idxs = tf.boolean_mask(features[i]['seqs'], features[i]['pick_masks']) - 1 # seqs is 1-based
+            # form candidates
+            if schema[i]['limited_vocab']:
+                candidate_segmented_seqs = token_char_ids[1:]
+                candidate_word_embeds = features[i]['candidate_word_embeds']
+                match_idxs = tf.boolean_mask(features[i]['seqs'], features[i]['pick_masks']) - 1 # seqs is 1-based
+            else:
+                # all features to select token from
+                select_from_segmented_seqs, select_from_word_embeds, select_from_word_masks = [], [], []
+                for j in features:
+                    if j == i or schema[j]['field_id'] in schema[i]['copy_from']:
+                        select_from_segmented_seqs.append(features[j]['segmented_seqs'])
+                        select_from_word_embeds.append(features[j]['word_embeds'])
+                        select_from_word_masks.append(features[j]['word_masks'])
+                select_from_segmented_seqs = tf.concat(select_from_segmented_seqs, axis=1)
+                select_from_word_embeds = tf.concat(select_from_word_embeds, axis=1)
+                select_from_word_masks = tf.concat(select_from_word_masks, axis=1)
+
+                valid_segmented_seqs_ref = tf.boolean_mask(select_from_segmented_seqs, select_from_word_masks)
+                _, valid_word_embeds_ref = tf.dynamic_partition(
+                    select_from_word_embeds, tf.cast(select_from_word_masks, tf.int32), 2)
+
+                unique_segmented_seqs_ref, unique_idxs = model_utils_py3.unique_vector(valid_segmented_seqs_ref)
+                # use tf.dynamic_partition to replace tf.gather
+                unique_1hots = tf.reduce_sum(
+                    tf.one_hot(unique_idxs, tf.shape(valid_word_embeds_ref)[0], dtype=tf.int32),
+                    axis=0)
+                _, unique_word_embeds_ref = tf.dynamic_partition(
+                    valid_word_embeds_ref,
+                    unique_1hots, 2)
+                if token_char_ids is None:
+                    candidate_segmented_seqs = unique_segmented_seqs_ref
+                    candidate_word_embeds = unique_word_embeds_ref
                 else:
-                    # all features to select token from
-                    select_from_segmented_seqs, select_from_word_embeds, select_from_word_masks = [], [], []
-                    for j in features:
-                        if j == i or schema[j]['field_id'] in schema[i]['copy_from']:
-                            select_from_segmented_seqs.append(features[j]['segmented_seqs'])
-                            select_from_word_embeds.append(features[j]['word_embeds'])
-                            select_from_word_masks.append(features[j]['word_masks'])
-                    select_from_segmented_seqs = tf.concat(select_from_segmented_seqs, axis=1)
-                    select_from_word_embeds = tf.concat(select_from_word_embeds, axis=1)
-                    select_from_word_masks = tf.concat(select_from_word_masks, axis=1)
-                    
-                    valid_segmented_seqs_ref = tf.boolean_mask(select_from_segmented_seqs, select_from_word_masks)
-                    _, valid_word_embeds_ref = tf.dynamic_partition(
-                        select_from_word_embeds, tf.cast(select_from_word_masks, tf.int32), 2)
-
-                    unique_segmented_seqs_ref, unique_idxs = model_utils_py3.unique_vector(valid_segmented_seqs_ref)
-                    # use tf.dynamic_partition to replace tf.gather
-                    unique_1hots = tf.reduce_sum(
-                        tf.one_hot(unique_idxs, tf.shape(valid_word_embeds_ref)[0], dtype=tf.int32),
+                    extra_cand_ids = token_char_ids[1:]
+                    extra_cand_match_matrix = model_utils_py3.match_vector(
+                        extra_cand_ids,
+                        unique_segmented_seqs_ref)
+                    extra_cand_masks = tf.logical_not(tf.reduce_any(extra_cand_match_matrix, axis=-1))
+                    candidate_segmented_seqs = tf.concat(
+                        [unique_segmented_seqs_ref,
+                         tf.boolean_mask(extra_cand_ids, extra_cand_masks)],
                         axis=0)
-                    _, unique_word_embeds_ref = tf.dynamic_partition(
-                        valid_word_embeds_ref,
-                        unique_1hots, 2)
-                    if token_char_ids is None:
-                        candidate_segmented_seqs = unique_segmented_seqs_ref
-                        candidate_word_embeds = unique_word_embeds_ref
-                    else:
-                        extra_cand_ids = token_char_ids[1:]
-                        extra_cand_match_matrix = model_utils_py3.match_vector(
-                            extra_cand_ids,
-                            unique_segmented_seqs_ref)
-                        extra_cand_masks = tf.logical_not(tf.reduce_any(extra_cand_match_matrix, axis=-1))
-                        candidate_segmented_seqs = tf.concat(
-                            [unique_segmented_seqs_ref,
-                             tf.boolean_mask(extra_cand_ids, extra_cand_masks)],
-                            axis=0)
-                        candidate_word_embeds = tf.concat(
-                            [unique_word_embeds_ref,
-                             tf.gather(features[i]['candidate_word_embeds'], extra_cand_masks)],
-                            axis=0)
+                    candidate_word_embeds = tf.concat(
+                        [unique_word_embeds_ref,
+                         tf.gather(features[i]['candidate_word_embeds'], extra_cand_masks)],
+                        axis=0)
 
-                    match_matrix = model_utils_py3.match_vector(
-                        pick_segmented_seqs_ref,
-                        candidate_segmented_seqs)
-                    match_idxs = tf.argmax(tf.cast(match_matrix, tf.int32), axis=-1, output_type=tf.int32)
-                num_candidates = tf.shape(candidate_segmented_seqs)[0]
+                match_matrix = model_utils_py3.match_vector(
+                    pick_segmented_seqs_ref,
+                    candidate_segmented_seqs)
+                match_idxs = tf.argmax(tf.cast(match_matrix, tf.int32), axis=-1, output_type=tf.int32)
+            num_candidates = tf.shape(candidate_segmented_seqs)[0]
 
-                # retrieve final encodes of candidates
-                if len(schema[i]['copy_from']) > 0:
-                    copy_from_segmented_seqs, copy_from_final_encodes, \
-                        copy_from_valid_masks, copy_from_pick_masks = [],[],[],[]
-                    for j in features:
-                        if schema[j]['field_id'] in schema[i]['copy_from']:
-                            copy_from_segmented_seqs.append(features[j]['segmented_seqs'])
-                            copy_from_final_encodes.append(features[j]['masked_features']['encodes'])
-                            copy_from_valid_masks.append(features[j]['masked_features']['masks'])
-                            copy_from_pick_masks.append(features[j]['pick_masks'])
-                    # first we get the matrix indicates whether x copy to y
-                    copy_from_segmented_seqs = tf.concat(copy_from_segmented_seqs, axis=1)
-                    copy_from_final_encodes = tf.concat(copy_from_final_encodes, axis=1)
-                    copy_from_valid_masks = tf.concat(copy_from_valid_masks, axis=1)
-                    copy_from_pick_masks = tf.concat(copy_from_pick_masks, axis=1)
-                    copy_from_match_matrix = model_utils_py3.match_vector(
-                        copy_from_segmented_seqs, copy_from_segmented_seqs)
-                    copy_from_match_matrix = tf.logical_and(copy_from_match_matrix, tf.expand_dims(copy_from_pick_masks, 1))
-                    copy_from_match_matrix = tf.logical_and(copy_from_match_matrix, tf.expand_dims(copy_from_valid_masks, 2))
-                    # calculate the normalized prob each slot being copied
-                    copy_from_scores = tf.cast(copy_from_match_matrix, tf.float32)
-                    copy_from_scores /= (tf.reduce_sum(copy_from_scores, axis=1, keepdims=True)+1e-12)
-                    copy_from_scores = tf.reduce_sum(copy_from_scores, axis=2)
-                    # gather all valid slots which can be selected from
-                    valid_segmented_seqs = tf.boolean_mask(copy_from_segmented_seqs, copy_from_valid_masks)
-                    valid_scores = tf.boolean_mask(copy_from_scores, copy_from_valid_masks)
-                    valid_final_encodes = tf.boolean_mask(copy_from_final_encodes, copy_from_valid_masks)
-                    valid_final_encodes = tf.pad(valid_final_encodes, [[0,1],[0,0]])
-                    # for each candidate token, we gather the probs of all corresponding slots
-                    valid_match_matrix = model_utils_py3.match_vector(
-                        candidate_segmented_seqs,
-                        valid_segmented_seqs)
-                    valid_match_matrix = tf.cast(valid_match_matrix, tf.float32)
-                    valid_match_scores = valid_match_matrix * tf.expand_dims(valid_scores+1e-12, axis=0)
-                    # copy / no copy is 1:1
-                    valid_pad_score = tf.reduce_sum(valid_match_scores, axis=1, keepdims=True)
-                    valid_pad_score = tf.maximum(valid_pad_score, 1e-12)
-                    valid_match_scores = tf.concat([valid_match_scores, valid_pad_score], axis=1)
-                    sample_ids = tf.squeeze(tf.random.categorical(tf.log(valid_match_scores), 1, dtype=tf.int32), axis=[-1])
-                    candidate_final_encodes = tf.gather(valid_final_encodes, sample_ids)
-                else:
-                    candidate_final_encodes = tf.zeros_like(candidate_word_embeds)
+            # retrieve final encodes of candidates
+            if len(schema[i]['copy_from']) > 0:
+                copy_from_segmented_seqs, copy_from_final_encodes, \
+                    copy_from_valid_masks, copy_from_pick_masks = [],[],[],[]
+                for j in features:
+                    if schema[j]['field_id'] in schema[i]['copy_from']:
+                        copy_from_segmented_seqs.append(features[j]['segmented_seqs'])
+                        copy_from_final_encodes.append(features[j]['masked_tfstruct'].encodes)
+                        copy_from_valid_masks.append(features[j]['masked_tfstruct'].masks)
+                        copy_from_pick_masks.append(features[j]['pick_masks'])
+                # first we get the matrix indicates whether x copy to y
+                copy_from_segmented_seqs = tf.concat(copy_from_segmented_seqs, axis=1)
+                copy_from_final_encodes = tf.concat(copy_from_final_encodes, axis=1)
+                copy_from_valid_masks = tf.concat(copy_from_valid_masks, axis=1)
+                copy_from_pick_masks = tf.concat(copy_from_pick_masks, axis=1)
+                copy_from_match_matrix = model_utils_py3.match_vector(
+                    copy_from_segmented_seqs, copy_from_segmented_seqs)
+                copy_from_match_matrix = tf.logical_and(copy_from_match_matrix, tf.expand_dims(copy_from_pick_masks, 1))
+                copy_from_match_matrix = tf.logical_and(copy_from_match_matrix, tf.expand_dims(copy_from_valid_masks, 2))
+                # calculate the normalized prob each slot being copied
+                copy_from_scores = tf.cast(copy_from_match_matrix, tf.float32)
+                copy_from_scores /= (tf.reduce_sum(copy_from_scores, axis=1, keepdims=True)+1e-12)
+                copy_from_scores = tf.reduce_sum(copy_from_scores, axis=2)
+                # gather all valid slots which can be selected from
+                valid_segmented_seqs = tf.boolean_mask(copy_from_segmented_seqs, copy_from_valid_masks)
+                valid_scores = tf.boolean_mask(copy_from_scores, copy_from_valid_masks)
+                valid_final_encodes = tf.boolean_mask(copy_from_final_encodes, copy_from_valid_masks)
+                valid_final_encodes = tf.pad(valid_final_encodes, [[0,1],[0,0]])
+                # for each candidate token, we gather the probs of all corresponding slots
+                valid_match_matrix = model_utils_py3.match_vector(
+                    candidate_segmented_seqs,
+                    valid_segmented_seqs)
+                valid_match_matrix = tf.cast(valid_match_matrix, tf.float32)
+                valid_match_scores = valid_match_matrix * tf.expand_dims(valid_scores+1e-12, axis=0)
+                # copy / no copy is 1:1
+                valid_pad_score = tf.reduce_sum(valid_match_scores, axis=1, keepdims=True)
+                valid_pad_score = tf.maximum(valid_pad_score, 1e-12)
+                valid_match_scores = tf.concat([valid_match_scores, valid_pad_score], axis=1)
+                sample_ids = tf.squeeze(tf.random.categorical(tf.log(valid_match_scores), 1, dtype=tf.int32), axis=[-1])
+                candidate_final_encodes = tf.gather(valid_final_encodes, sample_ids)
+            else:
+                candidate_final_encodes = tf.zeros_like(candidate_word_embeds)
 
-                # word_select_loss
-                candidate_embeds = tf.concat(
-                    [candidate_word_embeds, candidate_final_encodes], axis=-1)
-                word_select_logits_ref = word_matcher(
-                    pick_word_encodes_ref, candidate_embeds)
-                word_select_loss_ref = tf.nn.sparse_softmax_cross_entropy_with_logits(
-                    labels=match_idxs, logits=word_select_logits_ref)
-                word_select_loss_ref = tf.cond(
-                    tf.greater(tf.size(word_select_loss_ref), 0),
-                    lambda: tf.reduce_mean(word_select_loss_ref),
-                    lambda: tf.zeros([]))
+            # word_select_loss
+            candidate_embeds = tf.concat(
+                [candidate_word_embeds, candidate_final_encodes], axis=-1)
+            word_select_logits_ref = word_matcher(
+                pick_word_encodes_ref, candidate_embeds)
+            word_select_loss_ref = tf.nn.sparse_softmax_cross_entropy_with_logits(
+                labels=match_idxs, logits=word_select_logits_ref)
+            word_select_loss_ref = tf.cond(
+                tf.greater(tf.size(word_select_loss_ref), 0),
+                lambda: tf.reduce_mean(word_select_loss_ref),
+                lambda: tf.zeros([]))
 
-                # eval metrics
-                predicted_classes = tf.argmax(word_select_logits_ref, axis=-1, output_type=tf.int32)
-                accuracy = tf.metrics.accuracy(
-                    labels=match_idxs,
-                    predictions=predicted_classes)
-                metrics[str(i)] = accuracy
+            # eval metrics
+            predicted_classes = tf.argmax(word_select_logits_ref, axis=-1, output_type=tf.int32)
+            accuracy = tf.metrics.accuracy(
+                labels=match_idxs,
+                predictions=predicted_classes)
+            metrics[str(i)] = accuracy
 
-                # word_gen_loss
-                if not schema[i]['limited_vocab']:
-                    word_gen_loss_ref = get_speller_loss(
-                        pick_word_encodes_ref,
-                        pick_segmented_seqs_ref,
-                        spellin_embedding,
-                        speller_cell,
-                        speller_matcher)
-                else:
-                    word_gen_loss_ref = tf.zeros([])
+            # word_gen_loss
+            if not schema[i]['limited_vocab']:
+                word_gen_loss_ref = get_speller_loss(
+                    pick_word_encodes_ref,
+                    pick_segmented_seqs_ref,
+                    spellin_embedding,
+                    speller_cell,
+                    speller_matcher)
+            else:
+                word_gen_loss_ref = tf.zeros([])
 
-                target_loss_list.append(word_select_loss_ref + word_gen_loss_ref)
+            if run_config['data'][schema[i]['field_id']]['target_level'] > 0 or max_target_level == 0:
+                loss_list.append(word_select_loss_ref + word_gen_loss_ref)
 
         # gather losses
-        loss = sum(target_loss_list)
+        loss = sum(loss_list)
 
         # print total num of parameters
         total_params = 0
@@ -912,7 +966,7 @@ class Model(object):
         model_config = self.model_config
         input_embedding, spellin_embedding, \
             field_query_embedding, field_key_embedding, field_value_embedding = get_embeddings(
-            model_config['char_vocab_size'], model_config['char_vocab_dim'], model_config.get('char_vocab_emb'),
+            model_config['char_vocab_size'], model_config['char_vocab_dim'], self.char_vocab.embedding_init,
             model_config['num_layers'], model_config['layer_size'], training=False)
         word_embedder = Embedder(
             input_embedding, model_config['layer_size'],
@@ -923,6 +977,11 @@ class Model(object):
         word_matcher = Matcher(
             2*model_config['layer_size'],
             "Word_Matcher", dropout=None, training=False)
+        word_cell = TransformerCell("Word_Cell",
+                                    int(model_config['layer_size']/4),
+                                    word_encoder,
+                                    dropout=None,
+                                    training=False)
         speller_encoder = Encoder(
             int(model_config['layer_size']/2), 2, 4,
             "Speller_Encoder", dropout=None, training=False)
@@ -934,14 +993,18 @@ class Model(object):
                                    speller_encoder,
                                    dropout=None,
                                    training=False)
+        word_generator = WordGenerator(speller_cell, speller_matcher, spellin_embedding,
+                                       self.char_vocab.token2id[self.char_vocab.sep])
+        sent_generator = SentGenerator(word_cell, word_matcher, word_embedder, word_generator)
+        class_generator = ClassGenerator(word_encoder, word_matcher, word_embedder, word_generator)
         posit_size = int(model_config['layer_size']/4)
         batch_size = tf.shape(features[0]['seqs'])[0]
+        max_target_level = max([item['target_level'] for item in run_config['data']])
 
         for i, piece in features.items():
 
             seqs = piece['seqs']
             segs = piece['segs']
-            piece['features'] = {}
 
             # segment
             token_vocab = schema[i].get('token_vocab')
@@ -963,12 +1026,25 @@ class Model(object):
                     lambda: segmented_seqs_ref[:,:,:max_token_length])
             piece['segmented_seqs'] = segmented_seqs_ref
 
-            seq_length = tf.shape(segmented_seqs_ref)[1]
-            piece['seq_length'] = seq_length
-            if token_vocab is None:
-                piece['token_length'] = tf.shape(segmented_seqs_ref)[2]
+            # seq_length and token_length
+            if run_config['data'][schema[i]['field_id']]['target_level'] > 0:
+                if schema[i]['type'] == 'sequence':
+                    seq_length = run_config['data'][schema[i]['field_id']]['max_seq_length']
+                elif schema[i]['type'] == 'class':
+                    seq_length = 1
+                if token_vocab is None:
+                    token_length = run_config['data'][schema[i]['field_id']]['max_token_length']
+                else:
+                    token_length = tf.shape(piece['token_char_ids'])[1]
             else:
-                piece['token_length'] = tf.maximum(tf.shape(segmented_seqs_ref)[2], tf.shape(piece['token_char_ids'])[1])
+                seq_length = tf.shape(segmented_seqs_ref)[1]
+                if token_vocab is None:
+                    token_length = tf.shape(segmented_seqs_ref)[2]
+                else:
+                    token_length = tf.maximum(tf.shape(segmented_seqs_ref)[2],
+                                                       tf.shape(piece['token_char_ids'])[1])
+            piece['seq_length'] = seq_length
+            piece['token_length'] = token_length
 
             # embed words
             if not token_vocab is None:
@@ -976,23 +1052,27 @@ class Model(object):
                     tf.expand_dims(piece['token_char_ids'][1:], 0))
                 candidate_word_embeds = tf.squeeze(candidate_word_embeds, [0])
                 piece['candidate_word_embeds'] = candidate_word_embeds
-            if schema[i]['limited_vocab']:
-                word_embeds_ref = tf.gather(tf.pad(candidate_word_embeds, [[1,0],[0,0]]), seqs)
-                word_masks_ref = tf.greater(seqs, 0)
+            if run_config['data'][schema[i]['field_id']]['target_level'] > 0:
+                word_embeds_ref = tf.zeros([batch_size, seq_length, model_config['layer_size']])
+                word_masks_ref = tf.zeros([batch_size, seq_length], dtype=tf.bool)
             else:
-                word_embeds_ref, word_masks_ref = word_embedder(
-                    segmented_seqs_ref)
+                if schema[i]['limited_vocab']:
+                    word_embeds_ref = tf.gather(tf.pad(candidate_word_embeds, [[1,0],[0,0]]), seqs)
+                    word_masks_ref = tf.greater(seqs, 0)
+                else:
+                    word_embeds_ref, word_masks_ref = word_embedder(
+                        segmented_seqs_ref)
             piece['word_embeds'] = word_embeds_ref
             piece['word_masks'] = word_masks_ref
 
             # field_encodes and posit_embeds
-            piece['features']['field_query_embeds'] = tf.tile(
+            piece['field_query_embeds'] = tf.tile(
                 tf.nn.embedding_lookup(field_query_embedding, [[schema[i]['field_id']+1,]]),# field embeds 0 is reserved
                 [batch_size, seq_length, 1])
-            piece['features']['field_key_embeds'] = tf.tile(
+            piece['field_key_embeds'] = tf.tile(
                 tf.nn.embedding_lookup(field_key_embedding, [[schema[i]['field_id']+1,]]),# field embeds 0 is reserved
                 [batch_size, seq_length, 1])
-            piece['features']['field_value_embeds'] = tf.tile(
+            piece['field_value_embeds'] = tf.tile(
                 tf.nn.embedding_lookup(field_value_embedding, [[schema[i]['field_id']+1,]]),# field embeds 0 is reserved
                 [batch_size, seq_length, 1])
             if schema[i]['type'] == 'sequence':
@@ -1000,24 +1080,23 @@ class Model(object):
                 posit_embeds = model_utils_py3.embed_position(
                     posit_ids,
                     posit_size)
-            else:
+            elif schema[i]['type'] == 'class':
                 posit_embeds = tf.zeros([batch_size, seq_length, posit_size])
-            piece['features']['posit_embeds'] = posit_embeds
+            piece['posit_embeds'] = posit_embeds
 
-            # picking tokens
-            if run_config['data'][schema[i]['field_id']]['target_level'] > 0:
-                if schema[i]['type'] == 'sequence':
-                    pick_prob = 0.2
-                elif schema[i]['type'] == 'class':
-                    pick_prob = 1.0
-            else:
-                pick_prob = 0.0
-            pick_masks_ref = tf.less(tf.random_uniform([batch_size, seq_length]), pick_prob)
-            pick_masks_ref = tf.logical_and(pick_masks_ref, word_masks_ref)
-            piece['pick_masks'] = pick_masks_ref
-            piece['features']['masks'] = tf.logical_and(piece['word_masks'], tf.logical_not(piece['pick_masks']))
-            piece['features']['token_embeds'] = piece['word_embeds'] * \
-                tf.cast(tf.expand_dims(piece['features']['masks'], axis=2), tf.float32)
+            # tfstruct
+            piece['tfstruct'] = model_utils_py3.TransformerStruct(
+                field_query_embeds=piece['field_query_embeds'],
+                field_key_embeds=piece['field_key_embeds'],
+                field_value_embeds=piece['field_value_embeds'],
+                posit_embeds=piece['posit_embeds'],
+                token_embeds=piece['word_embeds'],
+                masks=piece['word_masks'],
+                querys=None,
+                keys=None,
+                values=None,
+                encodes=None,
+            )
 
         # pad segmented_seqs and token_ids to same token_length
         max_token_length = tf.reduce_max(tf.stack([features[i]['token_length'] for i in features], axis=0))
@@ -1032,42 +1111,165 @@ class Model(object):
                     [[0,0],[0,max_token_length-tf.shape(features[i]['token_char_ids'])[1]]])
 
         # add extra sample-level field
-        global_feature = {
-            'field_query_embeds': tf.tile(tf.nn.embedding_lookup(field_query_embedding, [[0,]]), [batch_size, 1, 1]),
-            'field_key_embeds': tf.tile(tf.nn.embedding_lookup(field_key_embedding, [[0,]]), [batch_size, 1, 1]),
-            'field_value_embeds': tf.tile(tf.nn.embedding_lookup(field_value_embedding, [[0,]]), [batch_size, 1, 1]),
-            'posit_embeds': tf.zeros([batch_size, 1, posit_size]),
-            'token_embeds': tf.zeros([batch_size, 1, model_config['layer_size']]),
-            'masks': tf.ones([batch_size, 1], dtype=tf.bool)
-        }
+        global_tfstruct = model_utils_py3.TransformerStruct(
+            field_query_embeds=tf.tile(tf.nn.embedding_lookup(field_query_embedding, [[0,]]), [batch_size, 1, 1]),
+            field_key_embeds=tf.tile(tf.nn.embedding_lookup(field_key_embedding, [[0,]]), [batch_size, 1, 1]),
+            field_value_embeds=tf.tile(tf.nn.embedding_lookup(field_value_embedding, [[0,]]), [batch_size, 1, 1]),
+            posit_embeds=tf.zeros([batch_size, 1, posit_size]),
+            token_embeds=tf.zeros([batch_size, 1, model_config['layer_size']]),
+            masks=tf.zeros([batch_size, 1], dtype=tf.bool),
+            querys=None,
+            keys=None,
+            values=None,
+            encodes=None,
+        )
+
+        # loop for non targets
+        tfstruct_list, feature_id_list = [], []
+        for i in features:
+            if run_config['data'][schema[i]['field_id']]['target_level'] == 0:
+                feature_id_list.append(i)
+                tfstruct_list.append(features[i]['tfstruct'])
 
         # prepare attn_matrix
         attn_matrix = []
-        attn_matrix.append([1]*(len(features)+1))
-        for i in features:
-            attn_matrix_local = [0]
-            for j in features:
+        for i in feature_id_list:
+            attn_matrix_local = []
+            for j in feature_id_list:
                 if i == j:
                     attn_matrix_local.append(1)
                 elif schema[i]['group_id'] == schema[j]['group_id'] and schema[i]['item_id'] != schema[j]['item_id']:
                     attn_matrix_local.append(0)
-                elif run_config['data'][schema[j]['field_id']]['target_level'] == 0:
-                    attn_matrix_local.append(1)
-                elif run_config['data'][schema[i]['field_id']]['target_level'] > \
-                    run_config['data'][schema[j]['field_id']]['target_level']:
-                    attn_matrix_local.append(1)
                 else:
-                    attn_matrix_local.append(0)
+                    attn_matrix_local.append(1)
             attn_matrix.append(attn_matrix_local)
 
         # get encodes
-        feature_list = [global_feature] + [features[i]['features'] for i in features]
-        feature_list = encode_features(word_encoder, feature_list, attn_matrix)
+        if len(feature_id_list) > 0:
+            tfstruct_list = encode_tfstructs(
+                word_encoder, tfstruct_list, attn_matrix, [])
+            for i, feature_id in enumerate(feature_id_list):
+                features[feature_id]['tfstruct'] = tfstruct_list[i]
 
-        # predict each target piece
-        for i in features:
+        # loop for target_level
+        predictions = {}
+        for tlevel in range(1, max_target_level+1):
 
-            pass
+            # generate one-by-one
+            for i in features:
+                if run_config['data'][schema[i]['field_id']]['target_level'] == tlevel:
+                    extra_tfstruct_list, extra_feature_id_list = [], []
+                    for j in features:
+                        if run_config['data'][schema[j]['field_id']]['target_level'] >= tlevel:
+                            continue
+                        elif schema[i]['group_id'] == schema[j]['group_id'] and \
+                            schema[i]['item_id'] != schema[j]['item_id']:
+                            continue
+                        else:
+                            extra_tfstruct_list.append(features[j]['tfstruct'])
+                            extra_feature_id_list.append(j)
+                    if len(extra_tfstruct_list) > 0:
+                        extra_tfstruct = model_utils_py3.concat_tfstructs(extra_tfstruct_list)
+                    else:
+                        extra_tfstruct = None
+
+                    # generate
+                    if schema[i]['type'] == 'sequence':
+                        seq_length = run_config['data'][schema[i]['field_id']]['max_seq_length']
+                        initial_state = TransformerState(
+                            field_query_embedding=tf.tile(
+                                tf.nn.embedding_lookup(field_query_embedding, [schema[i]['field_id']+1,]),
+                                [batch_size, 1]),
+                            field_key_embedding=tf.tile(
+                                tf.nn.embedding_lookup(field_key_embedding, [schema[i]['field_id']+1,]),
+                                [batch_size, 1]),
+                            field_value_embedding=tf.tile(
+                                tf.nn.embedding_lookup(field_value_embedding, [schema[i]['field_id']+1,]),
+                                [batch_size, 1]),
+                            dec_tfstruct=None,
+                            enc_tfstruct=extra_tfstruct,
+                        )
+                        if schema[i]['limited_vocab']:
+                            token_vocab = scheme[i]['token_vocab']
+                            sep_id = token_vocab.token2id[token_vocab.sep]
+                            word_embedding = features[i]['candidate_word_embeds']
+                            word_ids = tf.range(1, tf.shape(word_embedding)[0]+1, dtype=tf.int32)
+                            seqs, scores = sent_generator.generate(
+                                initial_state, seq_length,
+                                sep_id=sep_id, word_embedding=word_embedding, word_ids=word_ids)
+                            features[i]['seqs'] = seqs[:,0]
+                            features[i]['segs'] = tf.zeros([batch_size, 0])
+                            features[i]['segmented_seqs'] = tf.gather(
+                                features[i]['token_char_ids'],features[i]['seqs'])
+                        else:
+                            max_word_len = run_config['data'][schema[i]['field_id']]['max_token_length']
+                            seqs, scores = sent_generator.generate(
+                                initial_state, seq_length,
+                                max_word_len=max_word_len)
+                            features[i]['segmented_seqs'] = seqs[:,0]
+                            features[i]['seqs'], features[i]['segs'] = model_utils_py3.stitch_chars(
+                                features[i]['segmented_seqs'])
+                            features[i]['segs'] = tf.pad(
+                                features[i]['segs'], [[0,0],[1,1]], constant_values=1.0)
+                    elif schema[i]['type'] == 'class':
+                        tfstruct = features[i]['tfstruct']
+                        if schema[i]['limited_vocab']:
+                            token_vocab = scheme[i]['token_vocab']
+                            word_embedding = features[i]['candidate_word_embeds']
+                            word_ids = tf.range(1, tf.shape(word_embedding)[0]+1, dtype=tf.int32)
+                            classes, scores = class_generator.generate(
+                                tfstruct, extra_tfstruct,
+                                word_embedding=word_embedding, word_ids=word_ids)
+                            features[i]['seqs'] = classes[:,0]
+                            features[i]['segs'] = tf.zeros([batch_size, 0])
+                            features[i]['segmented_seqs'] = tf.gather(
+                                features[i]['token_char_ids'],features[i]['seqs'])
+                        else:
+                            max_word_len = run_config['data'][schema[i]['field_id']]['max_token_length']
+                            classes, scores = class_generator.generate(
+                                tfstruct, extra_tfstruct,
+                                max_word_len=max_word_len)
+                            features[i]['segmented_seqs'] = seqs[:,0]
+                            features[i]['seqs'], features[i]['segs'] = model_utils_py3.stitch_chars(
+                                features[i]['segmented_seqs'])
+                            features[i]['segs'] = tf.pad(
+                                features[i]['segs'], [[0,0],[1,1]], constant_values=1.0)
+
+                    # add to predictions
+                    predictions[str(i)+'-seqs'] = features[i]['seqs']
+                    predictions[str(i)+'-segs'] = features[i]['segs']
+
+                    if tlevel < max_target_level:
+                        # embed words
+                        if schema[i]['limited_vocab']:
+                            word_embeds_ref = tf.gather(
+                                tf.pad(features[i]['candidate_word_embeds'], [[1,0],[0,0]]), features[i]['seqs'])
+                            word_masks_ref = tf.greater(features[i]['seqs'], 0)
+                        else:
+                            word_embeds_ref, word_masks_ref = word_embedder(
+                                features[i]['segmented_seqs'])
+                        piece['word_embeds'] = word_embeds_ref
+                        piece['word_masks'] = word_masks_ref
+
+                        # encode
+                        tfstruct = model_utils_py3.TransformerStruct(
+                            field_query_embeds=features[i]['field_query_embeds'],
+                            field_key_embeds=features[i]['field_key_embeds'],
+                            field_value_embeds=features[i]['field_value_embeds'],
+                            posit_embeds=features[i]['posit_embeds'],
+                            token_embeds=features[i]['word_embeds'],
+                            masks=features[i]['word_masks'],
+                            querys=None,
+                            keys=None,
+                            values=None,
+                            encodes=None,
+                        )
+                        attn_masks = tfstruct.masks
+                        seq_length = tf.shape(attn_masks)[1]
+                        if not extra_tfstruct is None:
+                            attn_masks = tf.concat([attn_masks, extra_tfstruct.masks], axis=1)
+                        attn_masks = tf.tile(tf.expand_dims(attn_masks, axis=1), [1, seq_length, 1])
+                        features[i]['tfstruct'] = word_encoder(tfstruct, attn_masks, extra_tfstruct)
 
 
         # print total num of parameters
@@ -1082,7 +1284,4 @@ class Model(object):
         tf.logging.info('total number of parameters is: {}'.format(total_params))
 
         # return EstimatorSpec
-        predictions = {
-            'features': features,
-        }
         return tf.estimator.EstimatorSpec(tf.estimator.ModeKeys.PREDICT, predictions=predictions)
