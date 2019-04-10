@@ -108,6 +108,48 @@ def evaluate(
         config=config,
         warm_start_from=model.warm_start_from)
 
-    # start train and eval loop
+    # start evaluation
     lm.evaluate(
         input_fn=lambda: dataset.file_input_fn('eval', run_config, tf.estimator.ModeKeys.EVAL))
+
+def predict(
+    dataset,
+    model,
+    run_config):
+    """
+    train the model and evaluate every eval_every steps
+    """
+
+    config=tf.estimator.RunConfig(
+        log_step_count_steps=1000)
+    params = {'schema': dataset.schema, 'run_config': run_config}
+
+    # build estimator
+    lm = tf.estimator.Estimator(
+        model_fn=model.lm_model_fn,
+        model_dir=model.train_dir,
+        params=params,
+        config=config,
+        warm_start_from=model.warm_start_from)
+
+    # start prediction
+    predictions = lm.predict(
+        input_fn=lambda: dataset.file_input_fn('eval', run_config, tf.estimator.ModeKeys.PREDICT))
+
+    # get the target features
+    target_feature_ids = []
+    for i, ds in enumerate(dataset.schema):
+        if run_config['data'][ds['field_id']]['target_level'] > 0:
+            target_feature_ids.append(i)
+
+    # loop predictions and write
+    data_path = os.path.join(model.train_dir, 'predictions')
+    with open(data_path, 'w') as fwrite:
+        for pred in predictions:
+            text_list = []
+            for feature_id in target_feature_ids:
+                seqs = pred[str(feature_id)+'-seqs']
+                segs = pred[str(feature_id)+'-segs']
+                text = dataset.textify(feature_id, seqs, segs)
+                text_list.append(text)
+            fwrite.write(dataset.field_delim.join(text_list)+'\n')

@@ -289,12 +289,14 @@ class SeqGenerator(object):
                 return candidate_embeds, candidate_ids, None, None
             else:
                 if self.has_copy:
-                    candidate_embeds = tf.concat(
+                    candidate_embeds_matcher = tf.concat(
                         [candidate_embeds, tf.zeros_like(candidate_embeds)], axis=-1)
-                if limited_vocab:
-                    logits = self.matcher(encodes, candidate_embeds)
                 else:
-                    logits = self.matcher(tf.expand_dims(encodes, axis=1), candidate_embeds)
+                    candidate_embeds_matcher = candidate_embeds
+                if limited_vocab:
+                    logits = self.matcher(encodes, candidate_embeds_matcher)
+                else:
+                    logits = self.matcher(tf.expand_dims(encodes, axis=1), candidate_embeds_matcher)
                     logits = tf.squeeze(logits, [1])
                 return candidate_embeds, candidate_ids, candidate_masks, logits
         seqs, scores = self.decoder(
@@ -337,7 +339,7 @@ class WordGenerator(SeqGenerator):
             initial_state:
             length:
         """
-        SeqGenerator.generate(self, initial_state, length, self.candidates, True)
+        return SeqGenerator.generate(self, initial_state, length, self.candidates, True)
 
 class SentGenerator(SeqGenerator):
     """
@@ -381,28 +383,28 @@ class SentGenerator(SeqGenerator):
         elif not max_word_len is None:
             limited_vocab = False
             sep_ids = tf.constant([[self.word_generator.sep_id]+[0]*(max_word_len-1)], dtype=tf.int32)
-            sep_embedding = tf.squeeze(self.word_embedder(tf.expand_dims(sep_ids, axis=0)), [0])
+            sep_embedding = tf.squeeze(self.word_embedder(tf.expand_dims(sep_ids, axis=0))[0], [0])
             def candidates(encodes):
                 if encodes is None:
                     return sep_embedding, sep_ids, None
                 else:
                     batch_size = tf.shape(encodes)[0]
-                    initial_state = SpellerState(
+                    speller_initial_state = SpellerState(
                         word_encodes=encodes,
                         field_query_embedding=None,
                         field_key_embedding=None,
                         field_value_embedding=None,
                         dec_tfstruct=None,
                         enc_tfstruct=None)
-                    word_ids = word_generator.generate(initial_state, max_word_len)
-                    word_embeds = word_embedder(word_ids)
+                    word_ids, _ = self.word_generator.generate(speller_initial_state, max_word_len)
+                    word_embeds, _ = self.word_embedder(word_ids)
                     word_embeds = tf.concat(
                         [tf.tile(tf.expand_dims(sep_embedding, axis=0), [batch_size, 1, 1]), word_embeds],
                         axis=1)
                     word_ids = tf.concat(
                         [tf.tile(tf.expand_dims(sep_ids, axis=0), [batch_size, 1, 1]), word_ids], axis=1)
                     return word_embeds, word_ids, None
-        SeqGenerator.generate(self, initial_state, length, candidates, limited_vocab)
+        return SeqGenerator.generate(self, initial_state, length, candidates, limited_vocab)
 
 class ClassGenerator(object):
     """
@@ -437,6 +439,7 @@ class ClassGenerator(object):
             attn_masks = tf.concat([attn_masks, tf.expand_dims(extra_tfstruct.masks, axis=1)], axis=2)
         tfstruct = self.encoder(tfstruct, attn_masks, extra_tfstruct)
         word_encodes = tfstruct.encodes
+        word_encodes = tf.squeeze(word_encodes, [1])
         if not (word_embedding is None or word_ids is None):
             limited_vocab = True
             candidate_embeds, candidate_ids = word_embedding, word_ids
@@ -453,7 +456,7 @@ class ClassGenerator(object):
                 dec_tfstruct=None,
                 enc_tfstruct=None)
             candidate_ids = self.word_generator.generate(initial_state, max_word_len)
-            candidate_embeds = self.word_embedder(candidate_ids)
+            candidate_embeds, _ = self.word_embedder(candidate_ids)
             candidate_embeds = tf.concat(
                 [candidate_embeds, tf.zeros_like(candidate_embeds)], axis=-1)
             logits = self.matcher(tf.expand_dims(word_encodes, axis=1), candidate_embeds)

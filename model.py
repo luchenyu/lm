@@ -1214,7 +1214,7 @@ class Model(object):
                     elif schema[i]['type'] == 'class':
                         tfstruct = features[i]['tfstruct']
                         if schema[i]['limited_vocab']:
-                            token_vocab = scheme[i]['token_vocab']
+                            token_vocab = schema[i]['token_vocab']
                             word_embedding = features[i]['candidate_word_embeds']
                             word_ids = tf.range(1, tf.shape(word_embedding)[0]+1, dtype=tf.int32)
                             classes, scores = class_generator.generate(

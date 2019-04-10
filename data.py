@@ -84,8 +84,7 @@ class Dataset(object):
                     # tokenize
                     token_vocab = self.schema[i].get('token_vocab')
                     if self.schema[i]['limited_vocab']:
-                        tokens = [token_vocab.sep if word == '\t' else word for word in words]
-                        seqs = token_vocab.doc2idx(tokens)
+                        seqs = data_utils_py3.tokens_to_seqs(words, token_vocab)
                         segs = []
                     else:
                         seqs, segs = data_utils_py3.tokens_to_seqs_segs(words, self.char_vocab)
@@ -93,8 +92,7 @@ class Dataset(object):
                     # tokenize
                     token_vocab = self.schema[i].get('token_vocab')
                     if self.schema[i]['limited_vocab']:
-                        tokens = [piece]
-                        seqs = token_vocab.doc2idx(tokens)
+                        seqs = data_utils_py3.tokens_to_seqs([piece], token_vocab)
                         segs = []
                     else:
                         tokens = [piece]
@@ -140,3 +138,22 @@ class Dataset(object):
 
         return dataset
 
+    def textify(self, feature_id, seqs, segs):
+        """
+        turn ids to a text
+        args:
+            feature_id:
+            seqs: length
+            segs: 0 or (length+1)
+        return:
+            text: string
+        """
+        if self.schema[feature_id]['limited_vocab']:
+            text = ' '.join(
+                data_utils_py3.seqs_to_tokens(
+                    seqs, self.schema[feature_id]['token_vocab']))
+        else:
+            text = ' '.join(
+                data_utils_py3.seqs_segs_to_tokens(
+                    seqs, segs, self.char_vocab))
+        return text
