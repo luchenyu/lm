@@ -219,9 +219,6 @@ def get_speller_loss(
 
         initial_state = SpellerState(
             word_encodes=word_encodes,
-            field_query_embedding=None,
-            field_key_embedding=None,
-            field_value_embedding=None,
             dec_tfstruct=None,
             enc_tfstruct=None)
         inputs = tf.nn.embedding_lookup(
@@ -252,7 +249,7 @@ class SeqGenerator(object):
     """
     generate sequences
     """
-    def __init__(self, cell, matcher, has_copy):
+    def __init__(self, cell, matcher):
         """
         args:
             cell: map from inputs, state to outputs, state
@@ -261,16 +258,16 @@ class SeqGenerator(object):
         """
         self.cell = cell
         self.matcher = matcher
-        self.has_copy = has_copy
 
         self.decoder = model_utils_py3.greedy_dec
 
-    def generate(self, initial_state, length, candidates, limited_vocab):
+    def generate(self, initial_state, state_si, length, candidates_fn, start_embedding, ids_len):
         """
         args:
             initial_state:
+            state_si: state shape invariants
             length:
-            candidates:
+            candidates_fn:
                 when pass None, return SEP embeds and ids
                 args:
                     encodes: cell outputs
@@ -278,29 +275,29 @@ class SeqGenerator(object):
                     candidate_embeds: [batch_size x ]num_candidates x input_dim
                     candidate_ids: [batch_size x ]num_candidates [x word_len]
                     candidate_masks: [batch_size x ]num_candidates
-            limited_vocab: bool
+                    candidate_embeds_matcher: [batch_size x ]num_candidates x matcher_dim
+            start_embedding: input_dim
+            ids_len: 0 or int or tf.int32
         return:
             seqs: batch_size x num_candidates x length [x word_len]
             scores: batch_size x num_candidates
         """
         def candidates_callback(encodes):
-            candidate_embeds, candidate_ids, candidate_masks = candidates(encodes)
-            if encodes is None:
-                return candidate_embeds, candidate_ids, None, None
-            else:
-                if self.has_copy:
-                    candidate_embeds_matcher = tf.concat(
-                        [candidate_embeds, tf.zeros_like(candidate_embeds)], axis=-1)
-                else:
-                    candidate_embeds_matcher = candidate_embeds
-                if limited_vocab:
-                    logits = self.matcher(encodes, candidate_embeds_matcher)
-                else:
-                    logits = self.matcher(tf.expand_dims(encodes, axis=1), candidate_embeds_matcher)
-                    logits = tf.squeeze(logits, [1])
-                return candidate_embeds, candidate_ids, candidate_masks, logits
+            """
+            for dec callback
+            """
+            candidate_embeds, candidate_ids, candidate_masks, candidate_embeds_matcher \
+                = candidates_fn(encodes)
+
+            if len(candidate_embeds_matcher.get_shape()) == 2:
+                logits = self.matcher(encodes, candidate_embeds_matcher)
+            elif len(candidate_embeds_matcher.get_shape()) == 3:
+                logits = self.matcher(tf.expand_dims(encodes, axis=1), candidate_embeds_matcher)
+                logits = tf.squeeze(logits, [1])
+            return candidate_embeds, candidate_ids, candidate_masks, logits
+
         seqs, scores = self.decoder(
-            length, initial_state, self.cell, candidates_callback, limited_vocab)
+            length, initial_state, state_si, self.cell, candidates_callback, start_embedding, ids_len)
 
         return seqs, scores
 
@@ -317,29 +314,36 @@ class WordGenerator(SeqGenerator):
             sep_id: id for special sep token
         """
         self.sep_id = sep_id
-        pad_embedding = spellin_embedding[:1]
-        pad_ids = tf.zeros([1], dtype=tf.int32)
-        vocab_size = tf.shape(spellin_embedding)[0]
-        nosep_embedding = tf.concat(
+        self.pad_embedding = spellin_embedding[0]
+        self.nosep_embedding = tf.concat(
             [spellin_embedding[:sep_id], spellin_embedding[sep_id+1:]], axis=0)
-        nosep_ids = tf.concat(
-            [tf.range(sep_id, dtype=tf.int32), tf.range(sep_id+1, vocab_size, dtype=tf.int32)],
+        self.nosep_ids = tf.concat(
+            [tf.range(sep_id, dtype=tf.int32), 
+             tf.range(sep_id+1, tf.shape(spellin_embedding)[0], dtype=tf.int32)],
             axis=0)
-        def candidates(encodes):
-            if encodes is None:
-                return pad_embedding, pad_ids, None
-            else:
-                return nosep_embedding, nosep_ids, None
-        self.candidates = candidates
-        SeqGenerator.__init__(self, speller_cell, speller_matcher, False)
+        speller_matcher.cache_candidates(self.nosep_embedding)
+
+        SeqGenerator.__init__(self, speller_cell, speller_matcher)
 
     def generate(self, initial_state, length):
         """
         args:
-            initial_state:
+            initial_state: SpellerState
             length:
         """
-        return SeqGenerator.generate(self, initial_state, length, self.candidates, True)
+        state_si = SpellerState(
+            word_encodes=initial_state.word_encodes.get_shape(),
+            dec_tfstruct=model_utils_py3.get_tfstruct_si(initial_state.dec_tfstruct),
+            enc_tfstruct=model_utils_py3.get_tfstruct_si(initial_state.enc_tfstruct))
+
+        self.cell.cache_encodes(initial_state.word_encodes)
+
+        def candidates_fn(encodes):
+            return self.nosep_embedding, self.nosep_ids, None, self.nosep_embedding
+
+        start_embedding = self.pad_embedding
+
+        return SeqGenerator.generate(self, initial_state, state_si, length, candidates_fn, start_embedding, 0)
 
 class SentGenerator(SeqGenerator):
     """
@@ -355,56 +359,78 @@ class SentGenerator(SeqGenerator):
         """
         self.word_embedder = word_embedder
         self.word_generator = word_generator
-        SeqGenerator.__init__(self, word_cell, word_matcher, True)
+        SeqGenerator.__init__(self, word_cell, word_matcher)
 
-    def generate(self, initial_state, length, max_word_len=None, sep_id=None, word_embedding=None, word_ids=None):
+    def generate(self, initial_state, length,
+                 max_word_len=None, sep_id=None, word_embedding=None, word_ids=None):
         """
         args:
+            initial_state: TransformerState
+            length:
             max_word_len: int
             sep_id: int
             word_embedding: num_words x embed_dim
             word_ids: num_words
         """
+        state_si = TransformerState(
+            field_query_embedding=initial_state.field_query_embedding.get_shape(),
+            field_key_embedding=initial_state.field_key_embedding.get_shape(),
+            field_value_embedding=initial_state.field_value_embedding.get_shape(),
+            dec_tfstruct=model_utils_py3.get_tfstruct_si(initial_state.dec_tfstruct),
+            enc_tfstruct=model_utils_py3.get_tfstruct_si(initial_state.enc_tfstruct))
+
         if not (sep_id is None or word_embedding is None or word_ids is None):
-            limited_vocab = True
+            """fixed vocab"""
             sep_mask = tf.equal(word_ids, sep_id)
             nosep_mask = tf.logical_not(sep_mask)
-            sep_ids = tf.constant([sep_id], dtype=tf.int32)
             sep_embedding = tf.boolean_mask(word_embedding, sep_mask)
             nosep_embedding = tf.boolean_mask(word_embedding, nosep_mask)
+            sep_ids = tf.boolean_mask(word_ids, sep_mask)
             nosep_ids = tf.boolean_mask(word_ids, nosep_mask)
-            def candidates(encodes):
-                if encodes is None:
-                    return sep_embedding, sep_ids, None
-                else:
-                    word_embeds = tf.concat([sep_embedding, nosep_embedding], axis=0)
-                    word_ids = tf.concat([sep_ids, nosep_ids], axis=0)
-                    return word_embeds, word_ids, None
+            word_embedding = tf.concat([sep_embedding, nosep_embedding], axis=0)
+            word_ids = tf.concat([sep_ids, nosep_ids], axis=0)
+
+            word_embedding_matcher = tf.concat(
+                [word_embedding, tf.zeros_like(word_embedding)], axis=-1)
+            self.matcher.cache_candidates(word_embedding_matcher)
+
+            def candidates_fn(encodes):
+                return word_embedding, word_ids, None, word_embedding_matcher
+
+            ids_len = 0
+
         elif not max_word_len is None:
-            limited_vocab = False
+            """dynamic vocab"""
             sep_ids = tf.constant([[self.word_generator.sep_id]+[0]*(max_word_len-1)], dtype=tf.int32)
-            sep_embedding = tf.squeeze(self.word_embedder(tf.expand_dims(sep_ids, axis=0))[0], [0])
-            def candidates(encodes):
-                if encodes is None:
-                    return sep_embedding, sep_ids, None
-                else:
-                    batch_size = tf.shape(encodes)[0]
-                    speller_initial_state = SpellerState(
-                        word_encodes=encodes,
-                        field_query_embedding=None,
-                        field_key_embedding=None,
-                        field_value_embedding=None,
-                        dec_tfstruct=None,
-                        enc_tfstruct=None)
-                    word_ids, _ = self.word_generator.generate(speller_initial_state, max_word_len)
-                    word_embeds, _ = self.word_embedder(word_ids)
-                    word_embeds = tf.concat(
-                        [tf.tile(tf.expand_dims(sep_embedding, axis=0), [batch_size, 1, 1]), word_embeds],
-                        axis=1)
-                    word_ids = tf.concat(
-                        [tf.tile(tf.expand_dims(sep_ids, axis=0), [batch_size, 1, 1]), word_ids], axis=1)
-                    return word_embeds, word_ids, None
-        return SeqGenerator.generate(self, initial_state, length, candidates, limited_vocab)
+            sep_embedding, _ = self.word_embedder(tf.expand_dims(sep_ids, axis=0))
+            sep_embedding = tf.squeeze(sep_embedding, [0])
+
+            def candidates_fn(encodes):
+                batch_size = tf.shape(encodes)[0]
+                speller_encoder = self.word_generator.cell.assets['encoder']
+                null_tfstruct = model_utils_py3.init_tfstruct(
+                    batch_size, speller_encoder.embed_size, speller_encoder.posit_size,
+                    speller_encoder.layer_size, speller_encoder.num_layers)
+                speller_initial_state = SpellerState(
+                    word_encodes=encodes,
+                    dec_tfstruct=null_tfstruct,
+                    enc_tfstruct=null_tfstruct)
+                word_ids, _ = self.word_generator.generate(speller_initial_state, max_word_len)
+                word_embeds, _ = self.word_embedder(word_ids)
+                word_embeds = tf.concat(
+                    [tf.tile(tf.expand_dims(sep_embedding, axis=0), [batch_size, 1, 1]), word_embeds],
+                    axis=1)
+                word_ids = tf.concat(
+                    [tf.tile(tf.expand_dims(sep_ids, axis=0), [batch_size, 1, 1]), word_ids], axis=1)
+                word_embeds_matcher = tf.concat(
+                    [word_embeds, tf.zeros_like(word_embeds)], axis=-1)
+                return word_embeds, word_ids, None, word_embeds_matcher
+
+            ids_len = max_word_len
+
+        start_embedding = tf.squeeze(sep_embedding, [0])
+
+        return SeqGenerator.generate(self, initial_state, state_si, length, candidates_fn, start_embedding, ids_len)
 
 class ClassGenerator(object):
     """
@@ -441,21 +467,20 @@ class ClassGenerator(object):
         word_encodes = tfstruct.encodes
         word_encodes = tf.squeeze(word_encodes, [1])
         if not (word_embedding is None or word_ids is None):
-            limited_vocab = True
             candidate_embeds, candidate_ids = word_embedding, word_ids
             candidate_embeds = tf.concat(
                 [candidate_embeds, tf.zeros_like(candidate_embeds)], axis=-1)
             logits = self.matcher(word_encodes, candidate_embeds)
         elif not max_word_len is None:
-            limited_vocab = False
+            speller_encoder = self.word_generator.cell.assets['encoder']
+            null_tfstruct = model_utils_py3.init_tfstruct(
+                batch_size, speller_encoder.embed_size, speller_encoder.posit_size,
+                speller_encoder.layer_size, speller_encoder.num_layers)
             initial_state = SpellerState(
                 word_encodes=word_encodes,
-                field_query_embedding=None,
-                field_key_embedding=None,
-                field_value_embedding=None,
-                dec_tfstruct=None,
-                enc_tfstruct=None)
-            candidate_ids = self.word_generator.generate(initial_state, max_word_len)
+                dec_tfstruct=null_tfstruct,
+                enc_tfstruct=null_tfstruct)
+            candidate_ids, _ = self.word_generator.generate(initial_state, max_word_len)
             candidate_embeds, _ = self.word_embedder(candidate_ids)
             candidate_embeds = tf.concat(
                 [candidate_embeds, tf.zeros_like(candidate_embeds)], axis=-1)
@@ -464,9 +489,9 @@ class ClassGenerator(object):
         log_probs = tf.nn.log_softmax(logits)
         indices = tf.argmax(log_probs, 1, output_type=tf.int32)
         batch_indices = tf.stack([tf.range(batch_size, dtype=tf.int32), indices], axis=1)
-        if limited_vocab:
+        if len(candidate_embeds.get_shape()) == 2:
             classes = tf.gather(candidate_ids, indices)
-        else:
+        elif len(candidate_embeds.get_shape()) == 3:
             classes = tf.gather_nd(candidate_ids, batch_indices)
         scores = tf.gather_nd(log_probs, batch_indices)
         classes = tf.expand_dims(tf.expand_dims(classes, axis=1), axis=1)
@@ -538,13 +563,11 @@ class TransformerCell(GeneralCell):
     """Cell that wraps transformer"""
     def __init__(self,
                  scope,
-                 posit_size,
                  encoder,
                  dropout=None,
                  training=True):
         """
         args:
-            posit_size
             encoder: module
             dropout
             training
@@ -552,7 +575,6 @@ class TransformerCell(GeneralCell):
 
         GeneralCell.__init__(self,
                              scope,
-                             posit_size=posit_size,
                              encoder=encoder,
                              dropout=dropout,
                              training=training)
@@ -597,7 +619,7 @@ class TransformerCell(GeneralCell):
                 model_utils_py3.embed_position(
                     tf.expand_dims(tf.concat([tf.range(length), tf.range(1, length+1)], axis=0), axis=0) + \
                         current_idx,
-                    self.assets['posit_size']),
+                    self.assets['encoder'].posit_size),
                 [batch_size, 1, 1])
             token_embeds = tf.concat([inputs, tf.zeros_like(inputs)], axis=1)
             masks = tf.pad(tf.reduce_any(tf.not_equal(inputs, 0.0), axis=-1), [[0,0], [0,length]])
@@ -653,9 +675,6 @@ class TransformerCell(GeneralCell):
 """
 SpellerState:
     word_encodes: batch_size x word_layer_size
-    field_query_embedding: batch_size x num_layers*layer_size
-    field_key_embedding: batch_size x num_layers*layer_size
-    field_value_embedding: batch_size x num_layers*layer_size
     dec_tfstruct: {
         'field_query_embeds': batch_size x length x num_layers*layer_size,
         'field_key_embeds': batch_size x length x num_layers*layer_size,
@@ -672,15 +691,31 @@ SpellerState:
 """
 SpellerState = namedtuple('SpellerState', [
     'word_encodes',
-    'field_query_embedding',
-    'field_key_embedding',
-    'field_value_embedding',
     'dec_tfstruct',
     'enc_tfstruct']
 )
 
 class SpellerCell(TransformerCell):
     """wraps a speller"""
+    def __init__(self,
+                 scope,
+                 encoder,
+                 dropout=None,
+                 training=True):
+        """
+        args:
+            encoder: module
+            dropout
+            training
+        """
+
+        self.cached = {}
+        TransformerCell.__init__(self,
+                                 scope,
+                                 encoder=encoder,
+                                 dropout=dropout,
+                                 training=training)
+
     def __call__(self,
                  inputs,
                  state):
@@ -696,41 +731,62 @@ class SpellerCell(TransformerCell):
         with tf.variable_scope(self.scope, reuse=self.reuse):
 
             word_encodes = state.word_encodes
-            if state.field_value_embedding is None:
+            if not self.cached.get(word_encodes) is None:
+                field_query_embedding, field_key_embedding, \
+                    field_value_embedding = self.cached[word_encodes]
+            else:
                 num_layers = self.assets['encoder'].num_layers
                 layer_size = self.assets['encoder'].layer_size
+                reuse = None if len(self.cached) == 0 else True
                 field_value_embedding = model_utils_py3.fully_connected(
                     word_encodes,
                     num_layers*layer_size,
                     dropout=self.assets['dropout'],
                     is_training=self.assets['training'],
+                    reuse=reuse,
                     scope="enc_projs")
                 field_query_embedding = tf.zeros_like(field_value_embedding)
                 field_key_embedding = tf.zeros_like(field_value_embedding)
-                state = TransformerState(
-                    field_query_embedding=field_query_embedding,
-                    field_key_embedding=field_key_embedding,
-                    field_value_embedding=field_value_embedding,
-                    dec_tfstruct=state.dec_tfstruct,
-                    enc_tfstruct=state.enc_tfstruct)
-            else:
-                state = TransformerState(
-                    field_query_embedding=state.field_query_embedding,
-                    field_key_embedding=state.field_key_embedding,
-                    field_value_embedding=state.field_value_embedding,
-                    dec_tfstruct=state.dec_tfstruct,
-                    enc_tfstruct=state.enc_tfstruct)
+                self.cached[word_encodes] = (
+                    field_query_embedding, field_key_embedding, field_value_embedding)
+
+            state = TransformerState(
+                field_query_embedding=field_query_embedding,
+                field_key_embedding=field_key_embedding,
+                field_value_embedding=field_value_embedding,
+                dec_tfstruct=state.dec_tfstruct,
+                enc_tfstruct=state.enc_tfstruct)
 
         outputs, state = TransformerCell.__call__(self, inputs, state)
         state = SpellerState(
             word_encodes=word_encodes,
-            field_query_embedding=state.field_query_embedding,
-            field_key_embedding=state.field_key_embedding,
-            field_value_embedding=state.field_value_embedding,
             dec_tfstruct=state.dec_tfstruct,
             enc_tfstruct=state.enc_tfstruct)
 
         return outputs, state
+
+    def cache_encodes(self, word_encodes):
+        """
+        args:
+            word_encodes: batch_size x word_layer_size
+        """
+        with tf.variable_scope(self.scope, reuse=self.reuse):
+
+            if self.cached.get(word_encodes) is None:
+                num_layers = self.assets['encoder'].num_layers
+                layer_size = self.assets['encoder'].layer_size
+                reuse = None if len(self.cached) == 0 else True
+                field_value_embedding = model_utils_py3.fully_connected(
+                    word_encodes,
+                    num_layers*layer_size,
+                    dropout=self.assets['dropout'],
+                    is_training=self.assets['training'],
+                    reuse=reuse,
+                    scope="enc_projs")
+                field_query_embedding = tf.zeros_like(field_value_embedding)
+                field_key_embedding = tf.zeros_like(field_value_embedding)
+                self.cached[word_encodes] = (
+                    field_query_embedding, field_key_embedding, field_value_embedding)
 
 
 """Modules"""
@@ -843,7 +899,7 @@ class Encoder(Module):
     """
     Transformer encoder
     """
-    def __init__(self, layer_size, num_layers, num_heads,
+    def __init__(self, embed_size, posit_size, layer_size, num_layers, num_heads,
                  scope, dropout=None, training=False):
         """
         args:
@@ -851,6 +907,8 @@ class Encoder(Module):
             num_layers: num of layers
             num_heads: num of attention heads
         """
+        self.embed_size = embed_size
+        self.posit_size = posit_size
         self.layer_size = layer_size
         self.num_layers = num_layers
         self.num_heads = num_heads
@@ -925,13 +983,15 @@ class Matcher(Module):
                 scope="enc_projs")
             encode_projs *= tf.sqrt(1.0/float(self.layer_size))
 
-            if self.cached.get(token_embeds) != None:
+            if not self.cached.get(token_embeds) is None:
                 token_projs = self.cached[token_embeds]
             else:
+                reuse = None if len(self.cached) == 0 else True
                 token_projs = model_utils_py3.fully_connected(
                     token_embeds,
                     self.layer_size,
                     is_training=self.training,
+                    reuse=reuse,
                     scope="tok_projs")
                 self.cached[token_embeds] = token_projs
 
@@ -941,6 +1001,23 @@ class Matcher(Module):
         self.reuse = True
 
         return logits
+
+    def cache_candidates(self, token_embeds):
+        """
+        args:
+            token_embeds: num_candidates x token_dim or batch_size x num_candidates x token_dim
+        """
+        with tf.variable_scope(self.scope, reuse=self.reuse):
+
+            if self.cached.get(token_embeds) is None:
+                reuse = None if len(self.cached) == 0 else True
+                token_projs = model_utils_py3.fully_connected(
+                    token_embeds,
+                    self.layer_size,
+                    is_training=self.training,
+                    reuse=reuse,
+                    scope="tok_projs")
+                self.cached[token_embeds] = token_projs
 
 
 """ Optimizers """

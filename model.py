@@ -180,19 +180,20 @@ class Model(object):
             input_embedding, model_config['layer_size'],
             "Word_Embedder", dropout=embedder_dropout, training=True)
         word_encoder = Encoder(
+            model_config['layer_size'], int(model_config['layer_size']/4),
             model_config['layer_size'], model_config['num_layers'], model_config['num_heads'],
             "Word_Encoder", dropout=run_config.get('dropout'), training=True)
         word_matcher = Matcher(
             2*model_config['layer_size'],
             "Word_Matcher", dropout=run_config.get('dropout'), training=True)
         speller_encoder = Encoder(
+            int(model_config['layer_size']/2), int(model_config['layer_size']/8),
             int(model_config['layer_size']/2), 2, 4,
             "Speller_Encoder", dropout=run_config.get('dropout'), training=True)
         speller_matcher = Matcher(
             int(model_config['layer_size']/2),
             "Speller_Matcher", dropout=run_config.get('dropout'), training=True)
         speller_cell = SpellerCell("Speller_Cell",
-                                   int(model_config['layer_size']/8),
                                    speller_encoder,
                                    dropout=run_config.get('dropout'),
                                    training=True)
@@ -578,19 +579,20 @@ class Model(object):
             input_embedding, model_config['layer_size'],
             "Word_Embedder", dropout=None, training=False)
         word_encoder = Encoder(
+            model_config['layer_size'], int(model_config['layer_size']/4),
             model_config['layer_size'], model_config['num_layers'], model_config['num_heads'],
             "Word_Encoder", dropout=None, training=False)
         word_matcher = Matcher(
             2*model_config['layer_size'],
             "Word_Matcher", dropout=None, training=False)
         speller_encoder = Encoder(
+            int(model_config['layer_size']/2), int(model_config['layer_size']/8),
             int(model_config['layer_size']/2), 2, 4,
             "Speller_Encoder", dropout=None, training=False)
         speller_matcher = Matcher(
             int(model_config['layer_size']/2),
             "Speller_Matcher", dropout=None, training=False)
         speller_cell = SpellerCell("Speller_Cell",
-                                   int(model_config['layer_size']/8),
                                    speller_encoder,
                                    dropout=None,
                                    training=False)
@@ -972,24 +974,24 @@ class Model(object):
             input_embedding, model_config['layer_size'],
             "Word_Embedder", dropout=None, training=False)
         word_encoder = Encoder(
+            model_config['layer_size'], int(model_config['layer_size']/4),
             model_config['layer_size'], model_config['num_layers'], model_config['num_heads'],
             "Word_Encoder", dropout=None, training=False)
         word_matcher = Matcher(
             2*model_config['layer_size'],
             "Word_Matcher", dropout=None, training=False)
         word_cell = TransformerCell("Word_Cell",
-                                    int(model_config['layer_size']/4),
                                     word_encoder,
                                     dropout=None,
                                     training=False)
         speller_encoder = Encoder(
+            int(model_config['layer_size']/2), int(model_config['layer_size']/8),
             int(model_config['layer_size']/2), 2, 4,
             "Speller_Encoder", dropout=None, training=False)
         speller_matcher = Matcher(
             int(model_config['layer_size']/2),
             "Speller_Matcher", dropout=None, training=False)
         speller_cell = SpellerCell("Speller_Cell",
-                                   int(model_config['layer_size']/8),
                                    speller_encoder,
                                    dropout=None,
                                    training=False)
@@ -1151,6 +1153,11 @@ class Model(object):
             for i, feature_id in enumerate(feature_id_list):
                 features[feature_id]['tfstruct'] = tfstruct_list[i]
 
+        # null tfstruct
+        null_tfstruct = model_utils_py3.init_tfstruct(
+            batch_size, word_encoder.embed_size, word_encoder.posit_size,
+            word_encoder.layer_size, word_encoder.num_layers)
+
         # loop for target_level
         predictions = {}
         for tlevel in range(1, max_target_level+1):
@@ -1171,7 +1178,7 @@ class Model(object):
                     if len(extra_tfstruct_list) > 0:
                         extra_tfstruct = model_utils_py3.concat_tfstructs(extra_tfstruct_list)
                     else:
-                        extra_tfstruct = None
+                        extra_tfstruct = null_tfstruct
 
                     # generate
                     if schema[i]['type'] == 'sequence':
@@ -1186,7 +1193,7 @@ class Model(object):
                             field_value_embedding=tf.tile(
                                 tf.nn.embedding_lookup(field_value_embedding, [schema[i]['field_id']+1,]),
                                 [batch_size, 1]),
-                            dec_tfstruct=None,
+                            dec_tfstruct=null_tfstruct,
                             enc_tfstruct=extra_tfstruct,
                         )
                         if schema[i]['limited_vocab']:
