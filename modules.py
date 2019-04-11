@@ -249,7 +249,7 @@ class SeqGenerator(object):
     """
     generate sequences
     """
-    def __init__(self, cell, matcher):
+    def __init__(self, cell, matcher, decoder):
         """
         args:
             cell: map from inputs, state to outputs, state
@@ -258,10 +258,9 @@ class SeqGenerator(object):
         """
         self.cell = cell
         self.matcher = matcher
+        self.decoder = decoder
 
-        self.decoder = model_utils_py3.greedy_dec
-
-    def generate(self, initial_state, state_si, length, candidates_fn, start_embedding, ids_len):
+    def generate(self, initial_state, state_si_fn, length, candidates_fn, start_embedding, ids_len):
         """
         args:
             initial_state:
@@ -297,7 +296,7 @@ class SeqGenerator(object):
             return candidate_embeds, candidate_ids, candidate_masks, logits
 
         seqs, scores = self.decoder(
-            length, initial_state, state_si, self.cell, candidates_callback, start_embedding, ids_len)
+            length, initial_state, state_si_fn, self.cell, candidates_callback, start_embedding, ids_len)
 
         return seqs, scores
 
@@ -322,8 +321,9 @@ class WordGenerator(SeqGenerator):
              tf.range(sep_id+1, tf.shape(spellin_embedding)[0], dtype=tf.int32)],
             axis=0)
         speller_matcher.cache_candidates(self.nosep_embedding)
+        decoder = lambda *args: model_utils_py3.beam_dec(*args, beam_size=16, num_candidates=16)
 
-        SeqGenerator.__init__(self, speller_cell, speller_matcher)
+        SeqGenerator.__init__(self, speller_cell, speller_matcher, decoder)
 
     def generate(self, initial_state, length):
         """
@@ -331,10 +331,12 @@ class WordGenerator(SeqGenerator):
             initial_state: SpellerState
             length:
         """
-        state_si = SpellerState(
-            word_encodes=initial_state.word_encodes.get_shape(),
-            dec_tfstruct=model_utils_py3.get_tfstruct_si(initial_state.dec_tfstruct),
-            enc_tfstruct=model_utils_py3.get_tfstruct_si(initial_state.enc_tfstruct))
+        def state_si_fn(state):
+            state_si = SpellerState(
+                word_encodes=state.word_encodes.get_shape(),
+                dec_tfstruct=model_utils_py3.get_tfstruct_si(state.dec_tfstruct),
+                enc_tfstruct=model_utils_py3.get_tfstruct_si(state.enc_tfstruct))
+            return state_si
 
         self.cell.cache_encodes(initial_state.word_encodes)
 
@@ -343,7 +345,7 @@ class WordGenerator(SeqGenerator):
 
         start_embedding = self.pad_embedding
 
-        return SeqGenerator.generate(self, initial_state, state_si, length, candidates_fn, start_embedding, 0)
+        return SeqGenerator.generate(self, initial_state, state_si_fn, length, candidates_fn, start_embedding, 0)
 
 class SentGenerator(SeqGenerator):
     """
@@ -359,7 +361,9 @@ class SentGenerator(SeqGenerator):
         """
         self.word_embedder = word_embedder
         self.word_generator = word_generator
-        SeqGenerator.__init__(self, word_cell, word_matcher)
+        decoder = lambda *args: model_utils_py3.beam_dec(*args, beam_size=4, num_candidates=1)
+
+        SeqGenerator.__init__(self, word_cell, word_matcher, decoder)
 
     def generate(self, initial_state, length,
                  max_word_len=None, sep_id=None, word_embedding=None, word_ids=None):
@@ -372,12 +376,14 @@ class SentGenerator(SeqGenerator):
             word_embedding: num_words x embed_dim
             word_ids: num_words
         """
-        state_si = TransformerState(
-            field_query_embedding=initial_state.field_query_embedding.get_shape(),
-            field_key_embedding=initial_state.field_key_embedding.get_shape(),
-            field_value_embedding=initial_state.field_value_embedding.get_shape(),
-            dec_tfstruct=model_utils_py3.get_tfstruct_si(initial_state.dec_tfstruct),
-            enc_tfstruct=model_utils_py3.get_tfstruct_si(initial_state.enc_tfstruct))
+        def state_si_fn(state):
+            state_si = TransformerState(
+                field_query_embedding=state.field_query_embedding.get_shape(),
+                field_key_embedding=state.field_key_embedding.get_shape(),
+                field_value_embedding=state.field_value_embedding.get_shape(),
+                dec_tfstruct=model_utils_py3.get_tfstruct_si(state.dec_tfstruct),
+                enc_tfstruct=model_utils_py3.get_tfstruct_si(state.enc_tfstruct))
+            return state_si
 
         if not (sep_id is None or word_embedding is None or word_ids is None):
             """fixed vocab"""
@@ -430,7 +436,7 @@ class SentGenerator(SeqGenerator):
 
         start_embedding = tf.squeeze(sep_embedding, [0])
 
-        return SeqGenerator.generate(self, initial_state, state_si, length, candidates_fn, start_embedding, ids_len)
+        return SeqGenerator.generate(self, initial_state, state_si_fn, length, candidates_fn, start_embedding, ids_len)
 
 class ClassGenerator(object):
     """
