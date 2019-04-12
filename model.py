@@ -523,7 +523,12 @@ class Model(object):
         # return EstimatorSpec
         global_step = tf.train.get_global_step()
         optimizer = get_optimizer(
-            params['schedule'], global_step, run_config.get('max_lr'), params['num_steps'], run_config.get('pct_start'))
+            params['schedule'],
+            global_step,
+            run_config.get('max_lr'),
+            params['num_steps'],
+            run_config.get('pct_start'),
+            run_config.get('wd'))
         if self.isFreeze:
             var_list = [field_query_embedding, field_key_embedding, field_value_embedding]
         else:

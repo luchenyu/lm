@@ -12,7 +12,8 @@ def get_optimizer(
     global_step,
     max_lr,
     num_steps,
-    pct_start):
+    pct_start,
+    wd):
     """
     setting parameters for scheduling
     args:
@@ -32,7 +33,7 @@ def get_optimizer(
             learning_rate = tf.cond(
                 tf.less(x, pct_start),
                 lambda: 4e-2*max_lr + (max_lr - 4e-2*max_lr)*(x/pct_start),
-                lambda: (tf.math.cos((x-pct_start)/(1.0-pct_start)*math.pi) + 1.0) * 0.5*max_lr)
+                lambda: (tf.math.cos((x-pct_start)/(1.0-pct_start)*math.pi) + 1.0) * 0.5*(max_lr-wd) + wd)
             momentum = tf.cond(
                 tf.less(x, pct_start),
                 lambda: 0.95 + (0.85 - 0.95)*(x/pct_start),
