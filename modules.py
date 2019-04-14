@@ -1128,6 +1128,8 @@ class Matcher(Module):
                     transpose_b=True)
                 logits = tf.reshape(logits, tf.concat([shape, tf.shape(logits)[1]], axis=0))
 
+            logits *= float(self.layer_size)**-0.5
+
         self.reuse = True
 
         return logits
