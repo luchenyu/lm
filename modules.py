@@ -236,7 +236,8 @@ def get_speller_loss(
             tf.pad(target_seqs, [[0,0],[1,0]]))
         target_seqs = tf.pad(target_seqs, [[0,0],[0,1]])
         decMasks = tf.not_equal(target_seqs, 0)
-        decMasks = tf.logical_or(decMasks, tf.pad(tf.not_equal(target_seqs, 0), [[0,0],[1,0]])[:,:-1])
+        decMasks = tf.logical_or(
+            decMasks, tf.pad(tf.not_equal(target_seqs, 0), [[0,0],[1,0]])[:,:-1])
 
         def true_fn():
             outputs, state = speller_cell(inputs, initial_state)
@@ -244,9 +245,10 @@ def get_speller_loss(
                 outputs, tf.cast(decMasks, tf.int32), 2)
             valid_target_seqs = tf.boolean_mask(target_seqs, decMasks)
             valid_logits = speller_matcher((valid_outputs, spellin_embedding), ('encode', 'embed'))
-            valid_labels = tf.one_hot(valid_target_seqs, tf.shape(spellin_embedding)[0])
+            on_value = 1.0 / tf.cast(tf.shape(valid_target_seqs)[0], tf.float32)
+            valid_labels = tf.one_hot(
+                valid_target_seqs, tf.shape(spellin_embedding)[0], on_value=on_value)
             valid_labels = tf.reshape(valid_labels, [-1])
-            valid_labels /= tf.reduce_sum(valid_labels)
             valid_logits = tf.reshape(valid_logits, [-1])
             loss = tf.nn.softmax_cross_entropy_with_logits(
                 labels=valid_labels,
@@ -1111,6 +1113,11 @@ class Matcher(Module):
                 elif item_type == 'latent':
                     latents.append(item)
 
+            latents = tf.cond(
+                tf.greater(tf.size(latents[0]), tf.size(latents[1])),
+                lambda: (latents[0], latents[1]*(float(self.layer_size)**-0.5)),
+                lambda: (latents[0]*(float(self.layer_size)**-0.5), latents[1]))
+
             if len(latents[0].get_shape()) == len(latents[1].get_shape()):
                 logits = tf.matmul(latents[0], latents[1], transpose_b=True)
             elif len(latents[0].get_shape()) == 2:
@@ -1127,8 +1134,6 @@ class Matcher(Module):
                     latents[1],
                     transpose_b=True)
                 logits = tf.reshape(logits, tf.concat([shape, tf.shape(logits)[1]], axis=0))
-
-            logits *= float(self.layer_size)**-0.5
 
         self.reuse = True
 
