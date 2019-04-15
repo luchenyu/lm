@@ -244,7 +244,8 @@ def get_speller_loss(
             _, valid_outputs = tf.dynamic_partition(
                 outputs, tf.cast(decMasks, tf.int32), 2)
             valid_target_seqs = tf.boolean_mask(target_seqs, decMasks)
-            valid_logits = speller_matcher((valid_outputs, spellin_embedding), ('encode', 'embed'))
+            valid_logits = speller_matcher(
+                (valid_outputs, None, 'encode'), (spellin_embedding, None, 'embed'))
             on_value = 1.0 / tf.cast(tf.shape(valid_target_seqs)[0], tf.float32)
             valid_labels = tf.one_hot(
                 valid_target_seqs, tf.shape(spellin_embedding)[0], on_value=on_value)
@@ -311,15 +312,21 @@ class SeqGenerator(object):
                 candidate_embeds, candidate_ids, candidate_masks, candidate_encodes \
                     = candidates_fn(encodes)
 
-                if len(candidate_embeds.get_shape()) == 2:
-                    logits = self.matcher((encodes, candidate_embeds), ('encode', 'embed'))
-                    candidate_masks = tf.ones_like(logits, dtype=tf.bool)
-                elif len(candidate_embeds.get_shape()) == 3:
-                    logits = self.matcher((tf.expand_dims(encodes, axis=1), candidate_embeds), ('encode', 'embed'))
-                if not candidate_encodes is None:
-                    logits += self.matcher((tf.expand_dims(encodes, axis=1), candidate_encodes), ('encode', 'encode'))
+                if candidate_encodes is None:
+                    if len(candidate_embeds.get_shape()) == 2:
+                        logits = self.matcher(
+                            (encodes, None, 'encode'), (candidate_embeds, None, 'embed'))
+                    elif len(candidate_embeds.get_shape()) == 3:
+                        logits = self.matcher(
+                            (tf.expand_dims(encodes, axis=1), None, 'encode'), (candidate_embeds, None, 'embed'))
+                else:
+                    logits = self.matcher(
+                        (tf.expand_dims(encodes, axis=1), None, 'encode'),
+                        [(candidate_embeds, None, 'embed'), (candidate_encodes, None, 'encode')])
                 if len(logits.get_shape()) == 3:
                     logits = tf.squeeze(logits, [1])
+                if candidate_masks is None:
+                    candidate_masks = tf.ones_like(logits, dtype=tf.bool)
 
                 if concated_embeds is None:
                     concated_embeds, concated_ids, concated_masks, concated_logits = \
@@ -578,7 +585,8 @@ class ClassGenerator(object):
         word_encodes = tf.squeeze(word_encodes, [1])
         if not (word_embedding is None or word_ids is None):
             candidate_embeds, candidate_ids = word_embedding, word_ids
-            logits = self.matcher((word_encodes, candidate_embeds), ('encode', 'embed'))
+            logits = self.matcher(
+                (word_encodes, None, 'encode'), (candidate_embeds, None, 'embed'))
         elif not max_word_len is None:
             speller_encoder = self.word_generator.cell.assets['encoder']
             null_tfstruct = model_utils_py3.init_tfstruct(
@@ -597,7 +605,8 @@ class ClassGenerator(object):
             candidate_embeds, _ = self.word_embedder(candidate_ids)
             candidate_ids = tf.pad(
                 candidate_ids, [[0,0],[0,0],[0,max_word_len-tf.shape(candidate_ids)[2]]])
-            logits = self.matcher((tf.expand_dims(word_encodes, axis=1), candidate_embeds), ('encode', 'embed'))
+            logits = self.matcher(
+                (tf.expand_dims(word_encodes, axis=1), None, 'encode'), (candidate_embeds, None, 'embed'))
             logits = tf.squeeze(logits, [1])
         log_probs = tf.nn.log_softmax(logits)
         indices = tf.argmax(log_probs, 1, output_type=tf.int32)
@@ -1094,24 +1103,40 @@ class Matcher(Module):
         self.cached_embeds = {}
         Module.__init__(self, scope, dropout, training)
 
-    def __call__(self, pair, pair_type):
+    def __call__(self, *pair):
         """
         args:
-            pair: (item1, item2), each is one of {'encode', 'embed', 'latent'} object
-            pair_type: (type1, type2), str of type
+            pair: (item1, item2), each item is a tuple or list of tuples,
+                each tuple is (tensor_to_match, tensor_masks, type),
+                type is one of {'encode', 'embed', 'latent'} object
         returns:
             logits: shape1 x shape2
         """
+        assert(len(pair) == 2)
         with tf.variable_scope(self.scope, reuse=self.reuse):
 
+            def project(inputs, masks, input_type):
+                if input_type == 'encode':
+                    projs = self.cache_encodes(inputs)
+                elif input_type == 'embed':
+                    projs = self.cache_embeds(inputs)
+                else:
+                    projs = inputs
+                if not masks is None:
+                    projs *= tf.expand_dims(
+                        tf.cast(masks, tf.float32), axis=-1)
+                return projs
+
             latents = []
-            for item, item_type in zip(pair, pair_type):
-                if item_type == 'encode':
-                    latents.append(self.cache_encodes(item))
-                elif item_type == 'embed':
-                    latents.append(self.cache_embeds(item))
-                elif item_type == 'latent':
-                    latents.append(item)
+            for item in pair:
+                if isinstance(item, list):
+                    projs_list = [project(*i) for i in item]
+                    projs = projs_list[0]
+                    for p in projs_list[1:]:
+                        projs += p
+                else:
+                    projs = project(*item)
+                latents.append(projs)
 
             latents = tf.cond(
                 tf.greater(tf.size(latents[0]), tf.size(latents[1])),

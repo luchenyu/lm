@@ -393,6 +393,7 @@ class Model(object):
             _, pick_word_encodes_ref = tf.dynamic_partition(
                 features[i]['masked_tfstruct'].encodes, tf.cast(features[i]['pick_masks'], tf.int32), 2)
             num_pick_words = tf.shape(pick_word_encodes_ref)[0]
+            item1 = (pick_word_encodes_ref, None, 'encode')
 
             def true_fn():
                 # form candidates
@@ -449,11 +450,7 @@ class Model(object):
                     match_matrix = tf.cast(match_matrix, tf.float32)
                     match_idxs = tf.argmax(match_matrix, axis=-1, output_type=tf.int32)
                 num_candidates = tf.shape(candidate_segmented_seqs)[0]
-
-                # nocopy logits
-                word_select_logits = word_matcher(
-                    (pick_word_encodes_ref, candidate_word_embeds),
-                    ('encode', 'embed'))
+                item2 = (candidate_word_embeds, None, 'embed')
 
                 # retrieve copy encodes and add copy logits
                 if len(schema[i]['copy_from']) > 0:
@@ -498,21 +495,16 @@ class Model(object):
                     copy_masks = tf.not_equal(sample_ids, tf.shape(valid_encodes)[0]-1)
                     sample_onehots = tf.one_hot(sample_ids, tf.shape(valid_encodes)[0])
                     candidate_encodes = tf.matmul(sample_onehots, valid_encodes)
-                    copy_logits = word_matcher(
-                        (pick_word_encodes_ref, candidate_encodes),
-                        ('encode', 'encode'))
-                    copy_logits *= tf.cast(tf.expand_dims(copy_masks, axis=0), tf.float32)
-                    word_select_logits += copy_logits
+                    item2 = [item2, (candidate_encodes, copy_masks, 'encode')]
 
                 # prior logits
                 field_context_embeds = tf.nn.embedding_lookup(
                     field_context_embedding, [schema[i]['field_id']+1,])
                 context_prior_logits = word_matcher(
-                    (pick_word_encodes_ref, field_context_embeds),
-                    ('encode', 'latent'))
+                    (pick_word_encodes_ref, None, 'encode'), (field_context_embeds, None, 'latent'))
                 word_prior_logits = word_matcher(
-                    (field_context_embeds, candidate_word_embeds),
-                    ('latent', 'embed'))
+                    (field_context_embeds, None, 'latent'), (candidate_word_embeds, None, 'embed'))
+                word_select_logits = word_matcher(item1, item2)
                 word_select_logits = word_select_logits - context_prior_logits - word_prior_logits
 
                 # word_select_loss
@@ -867,6 +859,7 @@ class Model(object):
             _, pick_word_encodes_ref = tf.dynamic_partition(
                 features[i]['masked_tfstruct'].encodes, tf.cast(features[i]['pick_masks'], tf.int32), 2)
             num_pick_words = tf.shape(pick_word_encodes_ref)[0]
+            item1 = (pick_word_encodes_ref, None, 'encode')
 
             def true_fn():
                 # form candidates
@@ -923,11 +916,7 @@ class Model(object):
                     match_matrix = tf.cast(match_matrix, tf.float32)
                     match_idxs = tf.argmax(match_matrix, axis=-1, output_type=tf.int32)
                 num_candidates = tf.shape(candidate_segmented_seqs)[0]
-
-                # nocopy logits
-                word_select_logits = word_matcher(
-                    (pick_word_encodes_ref, candidate_word_embeds),
-                    ('encode', 'embed'))
+                item2 = (candidate_word_embeds, None, 'embed')
 
                 # retrieve copy encodes and add copy logits
                 if len(schema[i]['copy_from']) > 0:
@@ -972,13 +961,10 @@ class Model(object):
                     copy_masks = tf.not_equal(sample_ids, tf.shape(valid_encodes)[0]-1)
                     sample_onehots = tf.one_hot(sample_ids, tf.shape(valid_encodes)[0])
                     candidate_encodes = tf.matmul(sample_onehots, valid_encodes)
-                    copy_logits = word_matcher(
-                        (pick_word_encodes_ref, candidate_encodes),
-                        ('encode', 'encode'))
-                    copy_logits *= tf.cast(tf.expand_dims(copy_masks, axis=0), tf.float32)
-                    word_select_logits += copy_logits
+                    item2 = [item2, (candidate_encodes, copy_masks, 'encode')]
 
                 # word_select_loss
+                word_select_logits = word_matcher(item1, item2)
                 word_select_loss = tf.nn.sparse_softmax_cross_entropy_with_logits(
                     labels=match_idxs, logits=word_select_logits)
                 word_select_loss = tf.reduce_mean(word_select_loss)
