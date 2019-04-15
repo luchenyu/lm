@@ -481,7 +481,8 @@ class Model(object):
                     # gather all valid slots which can be selected from
                     valid_segmented_seqs = tf.boolean_mask(copy_from_segmented_seqs, copy_from_valid_masks)
                     valid_scores = tf.boolean_mask(copy_from_scores, copy_from_valid_masks)
-                    valid_encodes = tf.boolean_mask(copy_from_encodes, copy_from_valid_masks)
+                    _, valid_encodes = tf.dynamic_partition(
+                        copy_from_encodes, tf.cast(copy_from_valid_masks, tf.int32), 2)
                     valid_encodes = tf.pad(valid_encodes, [[0,1],[0,0]])
                     # for each candidate token, we gather the probs of all corresponding slots
                     valid_match_matrix = model_utils_py3.match_vector(
@@ -495,7 +496,8 @@ class Model(object):
                     valid_match_scores = tf.concat([valid_match_scores, valid_pad_score], axis=1)
                     sample_ids = tf.squeeze(tf.random.categorical(tf.log(valid_match_scores), 1, dtype=tf.int32), axis=[-1])
                     copy_masks = tf.not_equal(sample_ids, tf.shape(valid_encodes)[0]-1)
-                    candidate_encodes = tf.gather(valid_encodes, sample_ids)
+                    sample_onehots = tf.one_hot(sample_ids, tf.shape(valid_encodes)[0])
+                    candidate_encodes = tf.matmul(sample_onehots, valid_encodes)
                     copy_logits = word_matcher(
                         (pick_word_encodes_ref, candidate_encodes),
                         ('encode', 'encode'))
@@ -516,9 +518,9 @@ class Model(object):
                 # word_select_loss
                 word_select_logits = tf.reshape(word_select_logits, [num_pick_words*num_candidates])
                 labels = tf.reshape(match_matrix, [num_pick_words*num_candidates])
-                labels /= tf.reduce_sum(labels)
                 word_select_loss_post = tf.nn.softmax_cross_entropy_with_logits(
                     labels=labels, logits=word_select_logits)
+                word_select_loss_post /= tf.reduce_sum(labels)
                 word_select_loss_prior1 = tf.nn.sigmoid_cross_entropy_with_logits(
                     labels=tf.ones_like(context_prior_logits), logits=context_prior_logits)
                 word_select_loss_prior1 = tf.reduce_mean(word_select_loss_prior1)
@@ -953,7 +955,8 @@ class Model(object):
                     # gather all valid slots which can be selected from
                     valid_segmented_seqs = tf.boolean_mask(copy_from_segmented_seqs, copy_from_valid_masks)
                     valid_scores = tf.boolean_mask(copy_from_scores, copy_from_valid_masks)
-                    valid_encodes = tf.boolean_mask(copy_from_encodes, copy_from_valid_masks)
+                    _, valid_encodes = tf.dynamic_partition(
+                        copy_from_encodes, tf.cast(copy_from_valid_masks, tf.int32), 2)
                     valid_encodes = tf.pad(valid_encodes, [[0,1],[0,0]])
                     # for each candidate token, we gather the probs of all corresponding slots
                     valid_match_matrix = model_utils_py3.match_vector(
@@ -967,7 +970,8 @@ class Model(object):
                     valid_match_scores = tf.concat([valid_match_scores, valid_pad_score], axis=1)
                     sample_ids = tf.squeeze(tf.random.categorical(tf.log(valid_match_scores), 1, dtype=tf.int32), axis=[-1])
                     copy_masks = tf.not_equal(sample_ids, tf.shape(valid_encodes)[0]-1)
-                    candidate_encodes = tf.gather(valid_encodes, sample_ids)
+                    sample_onehots = tf.one_hot(sample_ids, tf.shape(valid_encodes)[0])
+                    candidate_encodes = tf.matmul(sample_onehots, valid_encodes)
                     copy_logits = word_matcher(
                         (pick_word_encodes_ref, candidate_encodes),
                         ('encode', 'encode'))
