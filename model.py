@@ -518,9 +518,9 @@ class Model(object):
                 # word_select_loss
                 word_select_logits = tf.reshape(word_select_logits, [num_pick_words*num_candidates])
                 labels = tf.reshape(match_matrix, [num_pick_words*num_candidates])
+                labels /= tf.reduce_sum(labels)
                 word_select_loss_post = tf.nn.softmax_cross_entropy_with_logits(
                     labels=labels, logits=word_select_logits)
-                word_select_loss_post /= tf.reduce_sum(labels)
                 word_select_loss_prior1 = tf.nn.sigmoid_cross_entropy_with_logits(
                     labels=tf.ones_like(context_prior_logits), logits=context_prior_logits)
                 word_select_loss_prior1 = tf.reduce_mean(word_select_loss_prior1)
