@@ -7,7 +7,8 @@ import tensorflow as tf
 def lr_range_test(
     dataset,
     model,
-    run_config,
+    field_mapping,
+    hyper_params,
     num_steps=1000):
     """
     train the model and evaluate every eval_every steps
@@ -16,12 +17,21 @@ def lr_range_test(
     config=tf.estimator.RunConfig(
         save_checkpoints_steps=None,
         save_checkpoints_secs=None,
-        log_step_count_steps=100)
-    params = {'schema': dataset.schema, 'run_config': run_config, 'schedule': 'lr_finder', 'num_steps': num_steps}
+        log_step_count_steps=int(num_steps/10))
+
+    mapped_index, mapped_schema = dataset.task_mapping(
+        field_mapping, model.task_config['task_spec'])
+    params = {
+        'data_index': mapped_index,
+        'data_schema': mapped_schema,
+        'hyper_params': hyper_params,
+        'schedule': 'lr_finder',
+        'num_steps': num_steps,
+    }
 
     # build estimator
     lm = tf.estimator.Estimator(
-        model_fn=model.lm_model_fn,
+        model_fn=model.model_fn,
         model_dir='',
         params=params,
         config=config,
@@ -29,13 +39,16 @@ def lr_range_test(
 
     # start lr range test
     lm.train(
-        input_fn=lambda: dataset.file_input_fn('train', run_config, tf.estimator.ModeKeys.TRAIN),
+        input_fn=lambda: dataset.file_input_fn(
+            'train', mapped_index, mapped_schema,
+            hyper_params['batch_size'], tf.estimator.ModeKeys.TRAIN),
         steps=num_steps)
 
 def train_and_evaluate(
     dataset,
     model,
-    run_config,
+    field_mapping,
+    hyper_params,
     eval_every=10000,
     distributed=True):
     """
@@ -46,16 +59,26 @@ def train_and_evaluate(
         strategy = tf.distribute.MirroredStrategy()
     else:
         strategy = None
+
     config=tf.estimator.RunConfig(
         train_distribute=strategy,
         log_step_count_steps=1000)
-    params = {'schema': dataset.schema, 'run_config': run_config, 'schedule': '1cycle', 'num_steps': run_config['max_train_steps']}
+
+    mapped_index, mapped_schema = dataset.task_mapping(
+        field_mapping, model.task_config['task_spec'])
+    params = {
+        'data_index': mapped_index,
+        'data_schema': mapped_schema,
+        'hyper_params': hyper_params,
+        'schedule': '1cycle',
+        'num_steps': hyper_params['max_train_steps'],
+    }
     if distributed:
         params['distributed'] = True
 
     # build estimator
     lm = tf.estimator.Estimator(
-        model_fn=model.lm_model_fn,
+        model_fn=model.model_fn,
         model_dir=model.train_dir,
         params=params,
         config=config,
@@ -74,14 +97,20 @@ def train_and_evaluate(
 
         # start train and eval loop
         counter = model.get_global_step()
-        while counter < run_config['max_train_steps']:
-            steps = min(eval_every - (counter % eval_every), run_config['max_train_steps'] - counter)
+        while counter < hyper_params['max_train_steps']:
+            steps = min(
+                eval_every - (counter % eval_every),
+                hyper_params['max_train_steps'] - counter)
             lm.train(
-                input_fn=lambda: dataset.file_input_fn('train', run_config, tf.estimator.ModeKeys.TRAIN),
+                input_fn=lambda: dataset.file_input_fn(
+                    'train', mapped_index, mapped_schema,
+                    hyper_params['batch_size'], tf.estimator.ModeKeys.TRAIN),
                 steps=steps)
             counter = model.get_global_step()
             lm.evaluate(
-                input_fn=lambda: dataset.file_input_fn('dev', run_config, tf.estimator.ModeKeys.EVAL))
+                input_fn=lambda: dataset.file_input_fn(
+                    'dev', mapped_index, mapped_schema,
+                    hyper_params['batch_size'], tf.estimator.ModeKeys.EVAL))
     except:
         traceback.print_exc()
     finally:
@@ -91,18 +120,26 @@ def train_and_evaluate(
 def evaluate(
     dataset,
     model,
-    run_config):
+    field_mapping,
+    hyper_params):
     """
     train the model and evaluate every eval_every steps
     """
 
     config=tf.estimator.RunConfig(
         log_step_count_steps=1000)
-    params = {'schema': dataset.schema, 'run_config': run_config}
+
+    mapped_index, mapped_schema = dataset.task_mapping(
+        field_mapping, model.task_config['task_spec'])
+    params = {
+        'data_index': mapped_index,
+        'data_schema': mapped_schema,
+        'hyper_params': hyper_params,
+    }
 
     # build estimator
     lm = tf.estimator.Estimator(
-        model_fn=model.lm_model_fn,
+        model_fn=model.model_fn,
         model_dir=model.train_dir,
         params=params,
         config=config,
@@ -110,23 +147,33 @@ def evaluate(
 
     # start evaluation
     lm.evaluate(
-        input_fn=lambda: dataset.file_input_fn('eval', run_config, tf.estimator.ModeKeys.EVAL))
+        input_fn=lambda: dataset.file_input_fn(
+            'eval', mapped_index, mapped_schema,
+            hyper_params['batch_size'], tf.estimator.ModeKeys.EVAL))
 
 def predict(
     dataset,
     model,
-    run_config):
+    field_mapping,
+    hyper_params):
     """
     train the model and evaluate every eval_every steps
     """
 
     config=tf.estimator.RunConfig(
         log_step_count_steps=1000)
-    params = {'schema': dataset.schema, 'run_config': run_config}
+
+    mapped_index, mapped_schema = dataset.task_mapping(
+        field_mapping, model.task_config['task_spec'])
+    params = {
+        'data_index': mapped_index,
+        'data_schema': mapped_schema,
+        'hyper_params': hyper_params,
+    }
 
     # build estimator
     lm = tf.estimator.Estimator(
-        model_fn=model.lm_model_fn,
+        model_fn=model.model_fn,
         model_dir=model.train_dir,
         params=params,
         config=config,
@@ -134,12 +181,15 @@ def predict(
 
     # start prediction
     predictions = lm.predict(
-        input_fn=lambda: dataset.file_input_fn('eval', run_config, tf.estimator.ModeKeys.PREDICT))
+        input_fn=lambda: dataset.file_input_fn(
+            'test', mapped_index, mapped_schema,
+            hyper_params['batch_size'], tf.estimator.ModeKeys.PREDICT))
 
     # get the target features
+    task_spec = model.task_config['task_spec']
     target_feature_ids = []
-    for i, ds in enumerate(dataset.schema):
-        if run_config['data'][ds['field_id']]['target_level'] > 0:
+    for i, item in enumerate(mapped_index):
+        if task_spec[item['field_id']]['target_level'] > 0:
             target_feature_ids.append(i)
 
     # loop predictions and write
@@ -150,6 +200,7 @@ def predict(
             for feature_id in target_feature_ids:
                 seqs = pred[str(feature_id)+'-seqs']
                 segs = pred[str(feature_id)+'-segs']
-                text = dataset.textify(feature_id, seqs, segs)
+                source_field_id = field_mapping[mapped_index[feature_id]['field_id']]
+                text = dataset.textify(source_field_id, seqs, segs)
                 text_list.append(text)
-            fwrite.write(dataset.field_delim.join(text_list)+'\n')
+            fwrite.write(dataset.data_config['segment_delim'].join(text_list)+'\n')

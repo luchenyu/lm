@@ -66,6 +66,8 @@ def get_embeddings(
     char_vocab_emb,
     num_layers,
     layer_size,
+    speller_embed_size,
+    match_size,
     training=True,
     reuse=None):
     """
@@ -100,8 +102,8 @@ def get_embeddings(
         spellin_embedding = model_utils_py3.MLP(
             char_embedding,
             2,
-            layer_size,
-            int(layer_size/2),
+            2*speller_embed_size,
+            speller_embed_size,
             is_training=training,
             scope="spellin")
         spellin_embedding = model_utils_py3.layer_norm(
@@ -133,7 +135,15 @@ def get_embeddings(
             aggregation=tf.VariableAggregation.MEAN)
         field_context_embedding = tf.get_variable(
             "field_context_embedding",
-            shape=[64, 2*layer_size],
+            shape=[64, match_size],
+            dtype=tf.float32,
+            initializer=tf.initializers.variance_scaling(mode='fan_out'),
+            trainable=training,
+            collections=collections,
+            aggregation=tf.VariableAggregation.MEAN)
+        field_word_embedding = tf.get_variable(
+            "field_word_embedding",
+            shape=[64, match_size],
             dtype=tf.float32,
             initializer=tf.initializers.variance_scaling(mode='fan_out'),
             trainable=training,
@@ -141,7 +151,8 @@ def get_embeddings(
             aggregation=tf.VariableAggregation.MEAN)
 
     return input_embedding, spellin_embedding, \
-        field_query_embedding, field_key_embedding, field_value_embedding, field_context_embedding
+        field_query_embedding, field_key_embedding, field_value_embedding, \
+        field_context_embedding, field_word_embedding
 
 def segment_words(
     seqs,
@@ -207,61 +218,94 @@ def encode_tfstructs(
 
     return tfstruct_list
 
-def get_speller_loss(
-    word_encodes,
-    target_seqs,
-    spellin_embedding,
-    speller_cell,
-    speller_matcher):
-    """
-    get the loss of speller
-    args:
-        word_encodes: batch_size x word_layer_size
-        target_seqs: batch_size x dec_seq_length
-        spellin_embedding: input embedding for spelling
-        speller_cell: speller cell
-        speller_matcher: matcher module
-    """
-    with tf.variable_scope("train_speller"):
+class SpellerTrainer(object):
+    """get the loss of a speller"""
+    def __init__(self, scope,
+                 spellin_embedding, speller_cell, speller_matcher,
+                 training=False):
+        """
+        args:
+            spellin_embedding: input embedding for spelling
+            speller_cell: speller cell
+            speller_matcher: matcher module
+        """
+        self.spellin_embedding = spellin_embedding
+        self.speller_cell = speller_cell
+        self.speller_matcher = speller_matcher
+        self.reuse = None
+        with tf.variable_scope(scope) as sc:
+            self.scope = sc
+        self.training = training
 
-        batch_size = tf.shape(target_seqs)[0]
+    def __call__(self, word_encodes, target_seqs):
+        """
+        get the loss of speller
+        args:
+            word_encodes: batch_size x word_layer_size
+            target_seqs: batch_size x dec_seq_length
+        """
+        with tf.variable_scope(self.scope, reuse=self.reuse):
 
-        initial_state = SpellerState(
-            word_encodes=word_encodes,
-            dec_masks=None,
-            dec_keys=None,
-            dec_values=None)
-        inputs = tf.nn.embedding_lookup(
-            spellin_embedding,
-            tf.pad(target_seqs, [[0,0],[1,0]]))
-        target_seqs = tf.pad(target_seqs, [[0,0],[0,1]])
-        decMasks = tf.not_equal(target_seqs, 0)
-        decMasks = tf.logical_or(
-            decMasks, tf.pad(tf.not_equal(target_seqs, 0), [[0,0],[1,0]])[:,:-1])
+            batch_size = tf.shape(target_seqs)[0]
 
-        def true_fn():
-            outputs, state = speller_cell(inputs, initial_state)
-            _, valid_outputs = tf.dynamic_partition(
-                outputs, tf.cast(decMasks, tf.int32), 2)
-            valid_target_seqs = tf.boolean_mask(target_seqs, decMasks)
-            valid_logits = speller_matcher(
-                (valid_outputs, None, 'encode'), (spellin_embedding, None, 'embed'))
-            on_value = 1.0 / tf.cast(tf.shape(valid_target_seqs)[0], tf.float32)
-            valid_labels = tf.one_hot(
-                valid_target_seqs, tf.shape(spellin_embedding)[0], on_value=on_value)
-            valid_labels = tf.reshape(valid_labels, [-1])
-            valid_logits = tf.reshape(valid_logits, [-1])
-            loss = tf.nn.softmax_cross_entropy_with_logits(
-                labels=valid_labels,
-                logits=valid_logits)
-            return loss
+            prior_projs = model_utils_py3.fully_connected(
+                word_encodes,
+                self.speller_matcher.layer_size,
+                is_training=self.training,
+                scope='prior_projs')
+            prior_projs = tf.expand_dims(prior_projs, axis=1)
 
-        loss = tf.cond(
-            tf.reduce_any(decMasks),
-            true_fn,
-            lambda: tf.zeros([]))
+            initial_state = SpellerState(
+                word_encodes=word_encodes,
+                dec_masks=None,
+                dec_keys=None,
+                dec_values=None)
+            inputs = tf.nn.embedding_lookup(
+                self.spellin_embedding,
+                tf.pad(target_seqs, [[0,0],[1,0]]))
+            target_seqs = tf.pad(target_seqs, [[0,0],[0,1]])
+            decMasks = tf.not_equal(target_seqs, 0)
+            decMasks = tf.logical_or(
+                decMasks, tf.pad(tf.not_equal(target_seqs, 0), [[0,0],[1,0]])[:,:-1])
 
-    return loss
+            def true_fn():
+                outputs, state = self.speller_cell(inputs, initial_state)
+                prior_logits = self.speller_matcher(
+                    (outputs, None, 'encode'), (prior_projs, None, 'latent'))
+                _, valid_outputs = tf.dynamic_partition(
+                    outputs, tf.cast(decMasks, tf.int32), 2)
+                _, valid_prior_logits = tf.dynamic_partition(
+                    prior_logits, tf.cast(decMasks, tf.int32), 2)
+                prior_loss = tf.nn.sigmoid_cross_entropy_with_logits(
+                    labels=tf.ones_like(valid_prior_logits), logits=valid_prior_logits)
+                prior_loss = tf.reduce_mean(prior_loss)
+                valid_target_seqs = tf.boolean_mask(target_seqs, decMasks)
+                label_sum = tf.cast(tf.shape(valid_target_seqs)[0], tf.float32)
+                on_value = 1.0 / label_sum
+                valid_logits = self.speller_matcher(
+                    (valid_outputs, None, 'encode'),
+                    (self.spellin_embedding, None, 'embed'))
+                valid_labels = tf.one_hot(
+                    valid_target_seqs,
+                    tf.shape(self.spellin_embedding)[0],
+                    on_value=on_value)
+                valid_post_logits = tf.reshape(valid_logits-valid_prior_logits, [-1])
+                valid_labels = tf.reshape(valid_labels, [-1])
+                loss = tf.nn.softmax_cross_entropy_with_logits_v2(
+                    labels=valid_labels,
+                    logits=valid_post_logits)
+                loss -= tf.log(label_sum)
+                loss += 0.1*prior_loss
+                return loss
+
+            loss = tf.cond(
+                tf.reduce_any(decMasks),
+                true_fn,
+                lambda: tf.zeros([]))
+
+        self.reuse=True
+
+        return loss
 
 
 """Generator"""
@@ -387,7 +431,7 @@ class WordGenerator(SeqGenerator):
              tf.range(sep_id+1, tf.shape(spellin_embedding)[0], dtype=tf.int32)],
             axis=0)
         speller_matcher.cache_embeds(self.nosep_embedding)
-        decoder = lambda *args: model_utils_py3.beam_dec(*args, beam_size=32, num_candidates=64)
+        decoder = lambda *args: model_utils_py3.stochastic_beam_dec(*args, beam_size=32, num_candidates=16)
 
         SeqGenerator.__init__(self, speller_cell, speller_matcher, decoder)
 
