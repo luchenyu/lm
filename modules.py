@@ -218,6 +218,281 @@ def encode_tfstructs(
 
     return tfstruct_list
 
+class WordTrainer(object):
+    """get the loss of masked slots"""
+    def __init__(self, scope,
+                 matcher,
+                 speller_trainer,
+                 training=False):
+        """
+        args:
+            scope: str
+            matcher: a matcher object
+            speller_trainer: a speller_trainer object
+        """
+        self.matcher = matcher
+        self.speller_trainer = speller_trainer
+        self.reuse = None
+        with tf.variable_scope(scope) as sc:
+            self.scope = sc
+        self.training = training
+
+    def __call__(
+        self,
+        limited_vocab,
+        field_context_embeds, field_word_embeds,
+        batch_word_ids, batch_word_embeds, batch_encodes,
+        batch_masks, batch_pick_masks,
+        candidate_ids=None, candidate_embeds=None, target_seqs=None,
+        copy_word_ids=None, copy_encodes=None, copy_masks=None):
+        """
+        get the loss
+        args:
+            limited_vocab: bool
+            field_context_embeds: 1 x match_size
+            field_word_embeds: 1 x match_size
+            batch_word_ids: batch_size x seq_length x word_len
+            batch_word_embeds: batch_size x seq_length x embed_dim
+            batch_encodes: batch_size x seq_length x encode_dim
+            batch_masks: batch_size x seq_length
+            batch_pick_masks: batch_size x seq_length
+            candidate_ids: num_candidates x word_len
+            candidate_embeds: num_candidates x embed_dim
+            target_seqs: batch_size x seq_length
+            copy_word_ids: batch_size x copy_seq_length x word_len
+            copy_encodes: batch_size x copy_seq_length x encode_dim
+            copy_masks: batch_size x copy_seq_length
+        """
+        with tf.variable_scope(self.scope, reuse=self.reuse):
+
+            batch_size = tf.shape(batch_word_ids)[0]
+            batch_masks_int = tf.cast(batch_masks, tf.int32)
+            batch_pick_masks_int = tf.cast(batch_pick_masks, tf.int32)
+
+            valid_word_ids = tf.boolean_mask(
+                batch_word_ids, batch_masks)
+            _, valid_word_embeds = tf.dynamic_partition(
+                batch_word_embeds, batch_masks_int, 2)
+            pick_word_ids = tf.boolean_mask(
+                batch_word_ids, batch_pick_masks)
+            _, pick_encodes = tf.dynamic_partition(
+                batch_encodes, batch_pick_masks_int, 2)
+            pick_target_seqs = tf.boolean_mask(
+                target_seqs, batch_pick_masks)
+            num_pick_words = tf.shape(pick_encodes)[0]
+            item1 = (pick_encodes, None, 'encode')
+
+            if not copy_word_ids is None and not candidate_ids is None:
+                batch_word_ids, candidate_ids, copy_word_ids = model_utils_py3.pad_vectors(
+                    [batch_word_ids, candidate_ids, copy_word_ids])
+            elif not candidate_ids is None:
+                batch_word_ids, candidate_ids = model_utils_py3.pad_vectors(
+                    [batch_word_ids, candidate_ids])
+            elif not copy_word_ids is None:
+                batch_word_ids, copy_word_ids = model_utils_py3.pad_vectors(
+                    [batch_word_ids, copy_word_ids])
+            def true_fn():
+
+                if limited_vocab:
+                    num_candidates = tf.shape(candidate_ids)[0]
+                    match_matrix = tf.one_hot(pick_target_seqs, num_candidates)
+                    item2 = (candidate_embeds, None, 'embed')
+                    match_logits = self.matcher(item1, item2)
+
+                    # copy part
+                    if not (copy_word_ids is None or copy_encodes is None or copy_masks is None):
+                        # first we get the matrix indicates whether x copy to y
+                        copy_score_matrix = model_utils_py3.match_vector(
+                            copy_word_ids, batch_word_ids)
+                        copy_score_matrix = tf.logical_and(
+                            copy_score_matrix, tf.expand_dims(batch_pick_masks, axis=1))
+                        copy_score_matrix = tf.logical_and(
+                            copy_score_matrix, tf.expand_dims(copy_masks, axis=2))
+                        # calculate the normalized prob each slot being copied
+                        copy_scores = tf.cast(copy_score_matrix, tf.float32)
+                        copy_scores /= (tf.reduce_sum(copy_scores, axis=1, keepdims=True)+1e-12)
+                        copy_scores = tf.reduce_sum(copy_scores, axis=2)
+                        # gather all valid slots which can be selected from
+                        copy_valid_word_ids = tf.boolean_mask(
+                            copy_word_ids, copy_masks)
+                        copy_valid_scores = tf.boolean_masks(
+                            copy_scores, copy_masks)
+                        _, copy_valid_encodes = tf.dynamic_partition(
+                            copy_encodes, tf.cast(copy_masks, tf.int32), 2)
+                        copy_valid_encodes = tf.pad(copy_valid_encodes, [[0,1],[0,0]])
+                        # for each candidate token, we gather the probs of all corresponding slots
+                        copy_valid_matrix = model_utils_py3.match_vector(
+                            candidate_ids, copy_valid_word_ids)
+                        copy_valid_matrix = tf.cast(copy_valid_matrix, tf.float32)
+                        copy_valid_match_scores = copy_valid_matrix * tf.expand_dims(
+                            copy_valid_scores+1e-12, axis=0)
+                        # copy / no copy is 1:1
+                        copy_valid_pad_score = tf.reduce_sum(
+                            copy_valid_match_scores, axis=1, keepdims=True)
+                        copy_valid_pad_score = tf.maximum(copy_valid_pad_score, 1e-12)
+                        copy_valid_match_scores = tf.concat(
+                            [copy_valid_match_scores, copy_valid_pad_score], axis=1)
+                        sample_ids = tf.squeeze(
+                            tf.random.categorical(
+                                tf.log(copy_valid_match_scores), 1, dtype=tf.int32),
+                            axis=[-1])
+                        num_copys = tf.shape(copy_valid_encodes)[0]
+                        candidate_masks = tf.not_equal(sample_ids, num_copys-1)
+                        sample_onehots = tf.one_hot(sample_ids, num_copys)
+                        candidate_encodes = tf.matmul(sample_onehots, copy_valid_encodes)
+                        item2 = (candidate_encodes, candidate_masks, 'encode')
+                        match_logits += self.matcher(item1, item2)
+
+                else:
+                    num_candidates = tf.shape(valid_word_ids)[0]
+                    item2 = (valid_word_embeds, None, 'embed')
+                    match_logits = self.matcher(item1, item2)
+                    seq_length = tf.shape(batch_word_ids)[1]
+                    x, y = tf.meshgrid(tf.range(seq_length), tf.range(batch_size))
+                    batch_indices = tf.stack([y, x], axis=2)
+                    pick_indices = tf.boolean_mask(
+                        batch_indices, batch_pick_masks)
+                    candidate_indices = tf.boolean_mask(
+                        batch_indices, batch_masks)
+                    match_matrix = model_utils_py3.match_vector(
+                        pick_indices, candidate_indices)
+                    match_matrix = tf.cast(match_matrix, tf.float32)
+
+                    # copy part
+                    if not (copy_word_ids is None or copy_encodes is None or copy_masks is None):
+                        copy_match_matrix = model_utils_py3.match_vector(
+                            batch_word_ids, copy_word_ids)
+                        copy_match_matrix = tf.logical_and(
+                            copy_match_matrix, tf.expand_dims(copy_masks, axis=1))
+                        copy_scores = tf.cast(copy_match_matrix, tf.float32)
+                        copy_pad_score = tf.reduce_sum(copy_scores, axis=2, keepdims=True)
+                        copy_pad_score = tf.maximum(copy_pad_score, 1e-12)
+                        copy_scores = tf.concat([copy_scores, copy_pad_score], axis=2)
+                        copy_encodes_padded = tf.pad(copy_encodes, [[0,0],[0,1],[0,0]])
+                        copy_length = tf.shape(copy_encodes_padded)[1]
+                        copy_scores = tf.reshape(
+                            copy_scores, [batch_size*seq_length, copy_length])
+                        copy_indices = tf.random.categorical(
+                            tf.log(copy_scores), 1, dtype=tf.int32)
+                        copy_indices = tf.reshape(copy_indices, [batch_size, seq_length])
+                        candidate_masks = tf.not_equal(copy_indices, copy_length-1)
+                        copy_onehots = tf.one_hot(copy_indices, copy_length)
+                        candidate_encodes = tf.matmul(copy_onehots, copy_encodes_padded)
+                        _, candidate_encodes = tf.dynamic_partition(
+                            candidate_encodes, batch_masks_int, 2)
+                        candidate_masks = tf.boolean_mask(candidate_masks, batch_masks)
+                        item2 = (candidate_encodes, candidate_masks, 'encode')
+                        match_logits += self.matcher(item1, item2)
+
+                # field-wise distribution
+                field_context_logits = self.matcher(
+                    (pick_encodes, None, 'encode'),
+                    (field_context_embeds, None, 'latent'))
+                field_word_logits = self.matcher(
+                    (field_word_embeds, None, 'latent'),
+                    (valid_word_embeds, None, 'embed'))
+                field_context_prior_loss = tf.nn.sigmoid_cross_entropy_with_logits(
+                    labels=tf.ones_like(field_context_logits), logits=field_context_logits)
+                field_context_prior_loss = tf.reduce_mean(field_context_prior_loss)
+                field_word_prior_loss = tf.nn.sigmoid_cross_entropy_with_logits(
+                    labels=tf.ones_like(field_word_logits), logits=field_word_logits)
+                field_word_prior_loss = tf.reduce_mean(field_word_prior_loss)
+
+                # sample-wise distribution
+                if limited_vocab:
+                    match_logits_post = match_logits - field_context_logits
+                else:
+                    match_logits_post = match_logits - field_context_logits - field_word_logits
+                label_sum = tf.reduce_sum(match_matrix)
+                labels = match_matrix * (1.0/label_sum)
+                match_logits_post = tf.reshape(
+                    match_logits_post, [num_pick_words*num_candidates])
+                labels = tf.reshape(labels, [num_pick_words*num_candidates])
+                match_post_loss = tf.nn.softmax_cross_entropy_with_logits_v2(
+                    labels=tf.stop_gradient(labels), logits=match_logits_post)
+                match_post_loss -= tf.log(label_sum)
+
+                loss = match_post_loss + 0.1*(
+                    field_context_prior_loss + field_word_prior_loss)
+
+                if not limited_vocab:
+                    loss += self.speller_trainer(
+                        pick_encodes, pick_word_ids)
+
+                return loss
+
+            loss = tf.cond(
+                tf.reduce_any(batch_pick_masks),
+                true_fn,
+                lambda: tf.zeros([]))
+
+        self.reuse=True
+
+        return loss
+
+class SentTrainer(WordTrainer):
+    """get the loss of a sent"""
+    def __init__(self, scope,
+                 cell, matcher,
+                 speller_trainer,
+                 training=False):
+        """
+        args:
+            scope: str
+            cell: a cell object
+            matcher: a matcher object
+            speller_trainer: a speller_trainer object
+        """
+        self.cell = cell
+        WordTrainer.__init__(self, scope, matcher, speller_trainer, training=training)
+
+    def __call__(
+        self,
+        limited_vocab,
+        initial_state,
+        field_context_embeds, field_word_embeds,
+        batch_word_ids, batch_word_embeds, batch_masks,
+        candidate_ids=None, candidate_embeds=None, target_seqs=None,
+        copy_word_ids=None, copy_encodes=None, copy_masks=None):
+        """
+        feed the inputs into cell, get the outputs, and then get the loss
+        args:
+            limited_vocab: bool
+            initial_state: state passed to cell
+            field_query_embedding: tuple(batch_size x encode_dim) * num_layers
+            field_key_embedding: tuple(batch_size x encode_dim) * num_layers
+            field_value_embedding: tuple(batch_size x encode_dim) * num_layers
+            field_context_embeds: 1 x match_size
+            field_word_embeds: 1 x match_size
+            batch_word_ids: batch_size x seq_length x word_len
+            batch_word_embeds: batch_size x seq_length x embed_dim
+            batch_masks: batch_size x seq_length
+            candidate_ids: num_candidates x word_len
+            candidate_embeds: num_candidates x embed_dim
+            target_seqs: batch_size x seq_length
+            copy_word_ids: batch_size x copy_seq_length x word_len
+            copy_encodes: batch_size x copy_seq_length x encode_dim
+            copy_masks: batch_size x copy_seq_length
+        """
+        inputs = batch_word_embeds[:,:-1]
+        output, state = self.cell(inputs, initial_state)
+        batch_word_ids = batch_word_ids[:,1:]
+        batch_word_embeds = batch_word_embeds[:,1:]
+        batch_encodes = outputs
+        batch_masks = batch_masks[:,1:]
+        batch_pick_masks = batch_masks
+        if not target_seqs is None:
+            target_seqs = target_seqs[:,1:]
+        loss = WordTrainer.__call__(
+            self, limited_vocab,
+            field_context_embeds, field_word_embeds,
+            batch_word_ids, batch_word_embeds, batch_encodes,
+            batch_masks, batch_pick_masks,
+            candidate_ids, candidate_embeds, target_seqs,
+            copy_word_ids, copy_encodes, copy_masks,
+        )
+        return loss
+
 class SpellerTrainer(object):
     """get the loss of a speller"""
     def __init__(self, scope,
@@ -247,6 +522,8 @@ class SpellerTrainer(object):
         with tf.variable_scope(self.scope, reuse=self.reuse):
 
             batch_size = tf.shape(target_seqs)[0]
+            length = tf.shape(target_seqs)[1]
+            input_dim = tf.shape(self.spellin_embedding)[1]
 
             prior_projs = model_utils_py3.fully_connected(
                 word_encodes,
@@ -260,9 +537,11 @@ class SpellerTrainer(object):
                 dec_masks=None,
                 dec_keys=None,
                 dec_values=None)
-            inputs = tf.nn.embedding_lookup(
-                self.spellin_embedding,
-                tf.pad(target_seqs, [[0,0],[1,0]]))
+            onehots = tf.one_hot(
+                tf.reshape(tf.pad(target_seqs, [[0,0],[1,0]]), [batch_size*(length+1)]),
+                tf.shape(self.spellin_embedding)[0])
+            inputs = tf.matmul(onehots, self.spellin_embedding)
+            inputs = tf.reshape(inputs, [batch_size, length+1, input_dim])
             target_seqs = tf.pad(target_seqs, [[0,0],[0,1]])
             decMasks = tf.not_equal(target_seqs, 0)
             decMasks = tf.logical_or(
@@ -292,7 +571,7 @@ class SpellerTrainer(object):
                 valid_post_logits = tf.reshape(valid_logits-valid_prior_logits, [-1])
                 valid_labels = tf.reshape(valid_labels, [-1])
                 loss = tf.nn.softmax_cross_entropy_with_logits_v2(
-                    labels=valid_labels,
+                    labels=tf.stop_gradient(valid_labels),
                     logits=valid_post_logits)
                 loss -= tf.log(label_sum)
                 loss += 0.1*prior_loss
@@ -431,7 +710,8 @@ class WordGenerator(SeqGenerator):
              tf.range(sep_id+1, tf.shape(spellin_embedding)[0], dtype=tf.int32)],
             axis=0)
         speller_matcher.cache_embeds(self.nosep_embedding)
-        decoder = lambda *args: model_utils_py3.stochastic_beam_dec(*args, beam_size=32, num_candidates=16)
+        decoder = lambda *args: model_utils_py3.stochastic_beam_dec(
+            *args, beam_size=16, num_candidates=16, cutoff_size=8, gamma=1.0)
 
         SeqGenerator.__init__(self, speller_cell, speller_matcher, decoder)
 
@@ -480,7 +760,8 @@ class SentGenerator(SeqGenerator):
         """
         self.word_embedder = word_embedder
         self.word_generator = word_generator
-        decoder = lambda *args: model_utils_py3.stochastic_beam_dec(*args, beam_size=32, num_candidates=1)
+        decoder = lambda *args: model_utils_py3.stochastic_beam_dec(
+            *args, beam_size=4, num_candidates=1, cutoff_size=16, gamma=16.0)
 
         SeqGenerator.__init__(self, word_cell, word_matcher, decoder)
 

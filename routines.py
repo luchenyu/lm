@@ -187,10 +187,14 @@ def predict(
 
     # get the target features
     task_spec = model.task_config['task_spec']
-    target_feature_ids = []
-    for i, item in enumerate(mapped_index):
-        if task_spec[item['field_id']]['target_level'] > 0:
-            target_feature_ids.append(i)
+    max_target_id = max([item['target_level'] for item in task_spec])
+    if max_target_id == 0:
+        target_feature_ids = list(range(len(mapped_index)))
+    else:
+        target_feature_ids = []
+        for i, item in enumerate(mapped_index):
+            if task_spec[item['field_id']]['target_level'] > 0:
+                target_feature_ids.append(i)
 
     # loop predictions and write
     data_path = os.path.join(model.train_dir, 'predictions')
