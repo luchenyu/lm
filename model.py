@@ -347,6 +347,8 @@ class Model(object):
                     segmented_seqs = tf.expand_dims(seqs, axis=1)
                 elif feature_type == 'sequence':
                     segmented_seqs = segment_words(seqs, segs)
+                else:
+                    segmented_seqs = None
                 if not max_token_length is None:
                     segmented_seqs = tf.cond(
                         tf.less(tf.shape(segmented_seqs)[2], max_token_length),
@@ -420,8 +422,10 @@ class Model(object):
                 posit_embeds = model_utils_py3.embed_position(
                     posit_ids,
                     posit_size)
-            else:
+            elif feature_type == 'class':
                 posit_embeds = tf.zeros([batch_size, seq_length, posit_size])
+            else:
+                posit_embeds = None
             feature['posit_embeds'] = posit_embeds
 
             # picking tokens
@@ -429,6 +433,8 @@ class Model(object):
                 pick_prob = 0.2
             elif feature_type == 'class':
                 pick_prob = 0.1
+            else:
+                pick_prob = None
             pick_masks = tf.less(tf.random_uniform([batch_size, seq_length]), pick_prob)
             pick_masks = tf.logical_and(pick_masks, word_masks)
             feature['pick_masks'] = pick_masks
@@ -585,6 +591,10 @@ class Model(object):
                 self_copy_word_ids = copy_word_ids
                 self_copy_encodes = copy_encodes
                 self_copy_masks = copy_masks
+            else:
+                self_copy_word_ids = None
+                self_copy_encodes = None
+                self_copy_masks = None
 
             # regulation loss
             regulation_loss = word_trainer(
@@ -655,7 +665,8 @@ class Model(object):
                         values=None,
                         encodes=None,
                     )
-                    tfstruct = encode_tfstructs(word_encoder, [tfstruct], [[1,1]], [extra_tfstruct])[0]
+                    tfstruct = encode_tfstructs(
+                        word_encoder, [tfstruct], [[1,1]], extra_tfstruct_list)[0]
                     target_loss = word_trainer(
                         limited_vocab,
                         field_context_embeds, field_word_embeds,
@@ -665,6 +676,8 @@ class Model(object):
                         candidate_ids, candidate_embeds, feature['seqs']-1,
                         copy_word_ids, copy_encodes, copy_masks,
                     )
+                else:
+                    target_loss = None
                 if target_losses.get(field_id) is None:
                     target_losses[field_id] = []
                 target_losses[field_id].append(target_loss)

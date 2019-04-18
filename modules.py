@@ -269,6 +269,17 @@ class WordTrainer(object):
             batch_masks_int = tf.cast(batch_masks, tf.int32)
             batch_pick_masks_int = tf.cast(batch_pick_masks, tf.int32)
 
+            if not copy_word_ids is None and not candidate_ids is None:
+                batch_word_ids, candidate_ids, copy_word_ids = model_utils_py3.pad_vectors(
+                    [batch_word_ids, candidate_ids, copy_word_ids])
+            elif not candidate_ids is None:
+                batch_word_ids, candidate_ids = model_utils_py3.pad_vectors(
+                    [batch_word_ids, candidate_ids])
+            elif not copy_word_ids is None:
+                batch_word_ids, copy_word_ids = model_utils_py3.pad_vectors(
+                    [batch_word_ids, copy_word_ids])
+
+
             valid_word_ids = tf.boolean_mask(
                 batch_word_ids, batch_masks)
             _, valid_word_embeds = tf.dynamic_partition(
@@ -282,149 +293,158 @@ class WordTrainer(object):
             num_pick_words = tf.shape(pick_encodes)[0]
             item1 = (pick_encodes, None, 'encode')
 
-            if not copy_word_ids is None and not candidate_ids is None:
-                batch_word_ids, candidate_ids, copy_word_ids = model_utils_py3.pad_vectors(
-                    [batch_word_ids, candidate_ids, copy_word_ids])
-            elif not candidate_ids is None:
-                batch_word_ids, candidate_ids = model_utils_py3.pad_vectors(
-                    [batch_word_ids, candidate_ids])
-            elif not copy_word_ids is None:
-                batch_word_ids, copy_word_ids = model_utils_py3.pad_vectors(
-                    [batch_word_ids, copy_word_ids])
+            if limited_vocab:
+                num_candidates = tf.shape(candidate_ids)[0]
+                match_matrix = tf.one_hot(pick_target_seqs, num_candidates)
+                item2 = (candidate_embeds, None, 'embed')
+                match_logits = self.matcher(item1, item2)
+
+                # copy part
+                if not (copy_word_ids is None or copy_encodes is None or copy_masks is None):
+                    # first we get the matrix indicates whether x copy to y
+                    copy_score_matrix = model_utils_py3.match_vector(
+                        copy_word_ids, batch_word_ids)
+                    copy_score_matrix = tf.logical_and(
+                        copy_score_matrix, tf.expand_dims(batch_pick_masks, axis=1))
+                    copy_score_matrix = tf.logical_and(
+                        copy_score_matrix, tf.expand_dims(copy_masks, axis=2))
+                    # calculate the normalized prob each slot being copied
+                    copy_scores = tf.cast(copy_score_matrix, tf.float32)
+                    copy_scores /= (tf.reduce_sum(copy_scores, axis=1, keepdims=True)+1e-12)
+                    copy_scores = tf.reduce_sum(copy_scores, axis=2)
+                    # gather all valid slots which can be selected from
+                    copy_valid_word_ids = tf.boolean_mask(
+                        copy_word_ids, copy_masks)
+                    copy_valid_scores = tf.boolean_masks(
+                        copy_scores, copy_masks)
+                    _, copy_valid_encodes = tf.dynamic_partition(
+                        copy_encodes, tf.cast(copy_masks, tf.int32), 2)
+                    copy_valid_encodes = tf.pad(copy_valid_encodes, [[0,1],[0,0]])
+                    # for each candidate token, we gather the probs of all corresponding slots
+                    copy_valid_matrix = model_utils_py3.match_vector(
+                        candidate_ids, copy_valid_word_ids)
+                    copy_valid_matrix = tf.cast(copy_valid_matrix, tf.float32)
+                    copy_valid_match_scores = copy_valid_matrix * tf.expand_dims(
+                        copy_valid_scores+1e-12, axis=0)
+                    # copy / no copy is 1:1
+                    copy_valid_pad_score = tf.reduce_sum(
+                        copy_valid_match_scores, axis=1, keepdims=True)
+                    copy_valid_pad_score = tf.maximum(copy_valid_pad_score, 1e-12)
+                    copy_valid_match_scores = tf.concat(
+                        [copy_valid_match_scores, copy_valid_pad_score], axis=1)
+                    sample_ids = tf.squeeze(
+                        tf.random.categorical(
+                            tf.log(copy_valid_match_scores), 1, dtype=tf.int32),
+                        axis=[-1])
+                    num_copys = tf.shape(copy_valid_encodes)[0]
+                    candidate_masks = tf.not_equal(sample_ids, num_copys-1)
+                    sample_onehots = tf.one_hot(sample_ids, num_copys)
+                    candidate_encodes = tf.matmul(sample_onehots, copy_valid_encodes)
+                    item2 = (candidate_encodes, candidate_masks, 'encode')
+                    match_logits += self.matcher(item1, item2)
+
+            else:
+                num_candidates = tf.shape(valid_word_ids)[0]
+                item2 = (valid_word_embeds, None, 'embed')
+                match_logits = self.matcher(item1, item2)
+                seq_length = tf.shape(batch_word_ids)[1]
+                x, y = tf.meshgrid(tf.range(seq_length), tf.range(batch_size))
+                batch_indices = tf.stack([y, x], axis=2)
+                pick_indices = tf.boolean_mask(
+                    batch_indices, batch_pick_masks)
+                candidate_indices = tf.boolean_mask(
+                    batch_indices, batch_masks)
+                match_matrix = model_utils_py3.match_vector(
+                    pick_indices, candidate_indices)
+                match_matrix = tf.cast(match_matrix, tf.float32)
+
+                # copy part
+                if not (copy_word_ids is None or copy_encodes is None or copy_masks is None):
+                    copy_match_matrix = model_utils_py3.match_vector(
+                        batch_word_ids, copy_word_ids)
+                    copy_match_matrix = tf.logical_and(
+                        copy_match_matrix, tf.expand_dims(copy_masks, axis=1))
+                    copy_scores = tf.cast(copy_match_matrix, tf.float32)
+                    copy_pad_score = tf.reduce_sum(copy_scores, axis=2, keepdims=True)
+                    copy_pad_score = tf.maximum(copy_pad_score, 1e-12)
+                    copy_scores = tf.concat([copy_scores, copy_pad_score], axis=2)
+                    copy_encodes_padded = tf.pad(copy_encodes, [[0,0],[0,1],[0,0]])
+                    copy_length = tf.shape(copy_encodes_padded)[1]
+                    copy_scores = tf.reshape(
+                        copy_scores, [batch_size*seq_length, copy_length])
+                    copy_indices = tf.random.categorical(
+                        tf.log(copy_scores), 1, dtype=tf.int32)
+                    copy_indices = tf.reshape(copy_indices, [batch_size, seq_length])
+                    candidate_masks = tf.not_equal(copy_indices, copy_length-1)
+                    copy_onehots = tf.one_hot(copy_indices, copy_length)
+                    candidate_encodes = tf.matmul(copy_onehots, copy_encodes_padded)
+                    _, candidate_encodes = tf.dynamic_partition(
+                        candidate_encodes, batch_masks_int, 2)
+                    candidate_masks = tf.boolean_mask(candidate_masks, batch_masks)
+                    item2 = (candidate_encodes, candidate_masks, 'encode')
+                    match_logits += self.matcher(item1, item2)
+
+            # field-wise distribution
+            field_context_logits = self.matcher(
+                (pick_encodes, None, 'encode'),
+                (field_context_embeds, None, 'latent'))
             def true_fn():
-
-                if limited_vocab:
-                    num_candidates = tf.shape(candidate_ids)[0]
-                    match_matrix = tf.one_hot(pick_target_seqs, num_candidates)
-                    item2 = (candidate_embeds, None, 'embed')
-                    match_logits = self.matcher(item1, item2)
-
-                    # copy part
-                    if not (copy_word_ids is None or copy_encodes is None or copy_masks is None):
-                        # first we get the matrix indicates whether x copy to y
-                        copy_score_matrix = model_utils_py3.match_vector(
-                            copy_word_ids, batch_word_ids)
-                        copy_score_matrix = tf.logical_and(
-                            copy_score_matrix, tf.expand_dims(batch_pick_masks, axis=1))
-                        copy_score_matrix = tf.logical_and(
-                            copy_score_matrix, tf.expand_dims(copy_masks, axis=2))
-                        # calculate the normalized prob each slot being copied
-                        copy_scores = tf.cast(copy_score_matrix, tf.float32)
-                        copy_scores /= (tf.reduce_sum(copy_scores, axis=1, keepdims=True)+1e-12)
-                        copy_scores = tf.reduce_sum(copy_scores, axis=2)
-                        # gather all valid slots which can be selected from
-                        copy_valid_word_ids = tf.boolean_mask(
-                            copy_word_ids, copy_masks)
-                        copy_valid_scores = tf.boolean_masks(
-                            copy_scores, copy_masks)
-                        _, copy_valid_encodes = tf.dynamic_partition(
-                            copy_encodes, tf.cast(copy_masks, tf.int32), 2)
-                        copy_valid_encodes = tf.pad(copy_valid_encodes, [[0,1],[0,0]])
-                        # for each candidate token, we gather the probs of all corresponding slots
-                        copy_valid_matrix = model_utils_py3.match_vector(
-                            candidate_ids, copy_valid_word_ids)
-                        copy_valid_matrix = tf.cast(copy_valid_matrix, tf.float32)
-                        copy_valid_match_scores = copy_valid_matrix * tf.expand_dims(
-                            copy_valid_scores+1e-12, axis=0)
-                        # copy / no copy is 1:1
-                        copy_valid_pad_score = tf.reduce_sum(
-                            copy_valid_match_scores, axis=1, keepdims=True)
-                        copy_valid_pad_score = tf.maximum(copy_valid_pad_score, 1e-12)
-                        copy_valid_match_scores = tf.concat(
-                            [copy_valid_match_scores, copy_valid_pad_score], axis=1)
-                        sample_ids = tf.squeeze(
-                            tf.random.categorical(
-                                tf.log(copy_valid_match_scores), 1, dtype=tf.int32),
-                            axis=[-1])
-                        num_copys = tf.shape(copy_valid_encodes)[0]
-                        candidate_masks = tf.not_equal(sample_ids, num_copys-1)
-                        sample_onehots = tf.one_hot(sample_ids, num_copys)
-                        candidate_encodes = tf.matmul(sample_onehots, copy_valid_encodes)
-                        item2 = (candidate_encodes, candidate_masks, 'encode')
-                        match_logits += self.matcher(item1, item2)
-
-                else:
-                    num_candidates = tf.shape(valid_word_ids)[0]
-                    item2 = (valid_word_embeds, None, 'embed')
-                    match_logits = self.matcher(item1, item2)
-                    seq_length = tf.shape(batch_word_ids)[1]
-                    x, y = tf.meshgrid(tf.range(seq_length), tf.range(batch_size))
-                    batch_indices = tf.stack([y, x], axis=2)
-                    pick_indices = tf.boolean_mask(
-                        batch_indices, batch_pick_masks)
-                    candidate_indices = tf.boolean_mask(
-                        batch_indices, batch_masks)
-                    match_matrix = model_utils_py3.match_vector(
-                        pick_indices, candidate_indices)
-                    match_matrix = tf.cast(match_matrix, tf.float32)
-
-                    # copy part
-                    if not (copy_word_ids is None or copy_encodes is None or copy_masks is None):
-                        copy_match_matrix = model_utils_py3.match_vector(
-                            batch_word_ids, copy_word_ids)
-                        copy_match_matrix = tf.logical_and(
-                            copy_match_matrix, tf.expand_dims(copy_masks, axis=1))
-                        copy_scores = tf.cast(copy_match_matrix, tf.float32)
-                        copy_pad_score = tf.reduce_sum(copy_scores, axis=2, keepdims=True)
-                        copy_pad_score = tf.maximum(copy_pad_score, 1e-12)
-                        copy_scores = tf.concat([copy_scores, copy_pad_score], axis=2)
-                        copy_encodes_padded = tf.pad(copy_encodes, [[0,0],[0,1],[0,0]])
-                        copy_length = tf.shape(copy_encodes_padded)[1]
-                        copy_scores = tf.reshape(
-                            copy_scores, [batch_size*seq_length, copy_length])
-                        copy_indices = tf.random.categorical(
-                            tf.log(copy_scores), 1, dtype=tf.int32)
-                        copy_indices = tf.reshape(copy_indices, [batch_size, seq_length])
-                        candidate_masks = tf.not_equal(copy_indices, copy_length-1)
-                        copy_onehots = tf.one_hot(copy_indices, copy_length)
-                        candidate_encodes = tf.matmul(copy_onehots, copy_encodes_padded)
-                        _, candidate_encodes = tf.dynamic_partition(
-                            candidate_encodes, batch_masks_int, 2)
-                        candidate_masks = tf.boolean_mask(candidate_masks, batch_masks)
-                        item2 = (candidate_encodes, candidate_masks, 'encode')
-                        match_logits += self.matcher(item1, item2)
-
-                # field-wise distribution
-                field_context_logits = self.matcher(
-                    (pick_encodes, None, 'encode'),
-                    (field_context_embeds, None, 'latent'))
-                field_word_logits = self.matcher(
-                    (field_word_embeds, None, 'latent'),
-                    (valid_word_embeds, None, 'embed'))
                 field_context_prior_loss = tf.nn.sigmoid_cross_entropy_with_logits(
                     labels=tf.ones_like(field_context_logits), logits=field_context_logits)
                 field_context_prior_loss = tf.reduce_mean(field_context_prior_loss)
+                return field_context_prior_loss
+
+            field_context_prior_loss = tf.cond(
+                tf.reduce_any(batch_pick_masks),
+                true_fn,
+                lambda: 0.0)
+
+            field_word_logits = self.matcher(
+                (field_word_embeds, None, 'latent'),
+                (valid_word_embeds, None, 'embed'))
+            def true_fn():
                 field_word_prior_loss = tf.nn.sigmoid_cross_entropy_with_logits(
                     labels=tf.ones_like(field_word_logits), logits=field_word_logits)
                 field_word_prior_loss = tf.reduce_mean(field_word_prior_loss)
+                return field_word_prior_loss
 
-                # sample-wise distribution
-                if limited_vocab:
-                    match_logits_post = match_logits - field_context_logits
-                else:
-                    match_logits_post = match_logits - field_context_logits - field_word_logits
-                label_sum = tf.reduce_sum(match_matrix)
-                labels = match_matrix * (1.0/label_sum)
-                match_logits_post = tf.reshape(
-                    match_logits_post, [num_pick_words*num_candidates])
-                labels = tf.reshape(labels, [num_pick_words*num_candidates])
+            field_word_prior_loss = tf.cond(
+                tf.reduce_any(batch_masks),
+                true_fn,
+                lambda: 0.0)
+
+            # sample-wise distribution
+            if limited_vocab:
+                match_logits_post = match_logits - field_context_logits
+            else:
+                match_logits_post = match_logits - field_context_logits - field_word_logits
+            label_sum = tf.reduce_sum(match_matrix)
+            labels = match_matrix * (1.0/label_sum)
+            match_logits_post = tf.reshape(
+                match_logits_post, [num_pick_words*num_candidates])
+            labels = tf.reshape(labels, [num_pick_words*num_candidates])
+
+            def true_fn():
                 match_post_loss = tf.nn.softmax_cross_entropy_with_logits_v2(
                     labels=tf.stop_gradient(labels), logits=match_logits_post)
                 match_post_loss -= tf.log(label_sum)
+                return match_post_loss
 
-                loss = match_post_loss + 0.1*(
-                    field_context_prior_loss + field_word_prior_loss)
-
-                if not limited_vocab:
-                    loss += self.speller_trainer(
-                        pick_encodes, pick_word_ids)
-
-                return loss
-
-            loss = tf.cond(
+            match_post_loss = tf.cond(
                 tf.reduce_any(batch_pick_masks),
                 true_fn,
-                lambda: tf.zeros([]))
+                lambda: 0.0)
+
+            loss = match_post_loss + 0.1*(
+                field_context_prior_loss + field_word_prior_loss)
+
+            if not limited_vocab:
+                speller_loss = tf.cond(
+                    tf.reduce_any(batch_pick_masks),
+                    lambda: self.speller_trainer(
+                        pick_encodes, pick_word_ids),
+                    lambda: 0.0)
+                loss += speller_loss
 
         self.reuse=True
 
@@ -523,49 +543,52 @@ class SpellerTrainer(object):
 
             batch_size = tf.shape(target_seqs)[0]
             length = tf.shape(target_seqs)[1]
-            input_dim = tf.shape(self.spellin_embedding)[1]
+            input_dim = self.spellin_embedding.get_shape()[1].value
 
-            prior_projs = model_utils_py3.fully_connected(
-                word_encodes,
-                self.speller_matcher.layer_size,
-                is_training=self.training,
-                scope='prior_projs')
-            prior_projs = tf.expand_dims(prior_projs, axis=1)
-
-            initial_state = SpellerState(
-                word_encodes=word_encodes,
-                dec_masks=None,
-                dec_keys=None,
-                dec_values=None)
-            onehots = tf.one_hot(
-                tf.reshape(tf.pad(target_seqs, [[0,0],[1,0]]), [batch_size*(length+1)]),
-                tf.shape(self.spellin_embedding)[0])
-            inputs = tf.matmul(onehots, self.spellin_embedding)
-            inputs = tf.reshape(inputs, [batch_size, length+1, input_dim])
-            target_seqs = tf.pad(target_seqs, [[0,0],[0,1]])
-            decMasks = tf.not_equal(target_seqs, 0)
-            decMasks = tf.logical_or(
-                decMasks, tf.pad(tf.not_equal(target_seqs, 0), [[0,0],[1,0]])[:,:-1])
+            input_ids = tf.pad(target_seqs, [[0,0],[1,0]])
+            output_ids = tf.pad(target_seqs, [[0,0],[0,1]])
+            valid_masks = tf.logical_or(
+                tf.not_equal(output_ids, 0),
+                tf.not_equal(input_ids, 0))
 
             def true_fn():
+
+                onehots = tf.one_hot(
+                    tf.reshape(input_ids, [batch_size*(length+1)]),
+                    tf.shape(self.spellin_embedding)[0])
+                inputs = tf.matmul(onehots, self.spellin_embedding)
+                inputs = tf.reshape(inputs, [batch_size, length+1, input_dim])
+
+                prior_projs = model_utils_py3.fully_connected(
+                    word_encodes,
+                    self.speller_matcher.layer_size,
+                    is_training=self.training,
+                    scope='prior_projs')
+                prior_projs = tf.expand_dims(prior_projs, axis=1)
+                initial_state = SpellerState(
+                    word_encodes=word_encodes,
+                    dec_masks=None,
+                    dec_keys=None,
+                    dec_values=None)
+
                 outputs, state = self.speller_cell(inputs, initial_state)
                 prior_logits = self.speller_matcher(
                     (outputs, None, 'encode'), (prior_projs, None, 'latent'))
                 _, valid_outputs = tf.dynamic_partition(
-                    outputs, tf.cast(decMasks, tf.int32), 2)
+                    outputs, tf.cast(valid_masks, tf.int32), 2)
                 _, valid_prior_logits = tf.dynamic_partition(
-                    prior_logits, tf.cast(decMasks, tf.int32), 2)
+                    prior_logits, tf.cast(valid_masks, tf.int32), 2)
                 prior_loss = tf.nn.sigmoid_cross_entropy_with_logits(
                     labels=tf.ones_like(valid_prior_logits), logits=valid_prior_logits)
                 prior_loss = tf.reduce_mean(prior_loss)
-                valid_target_seqs = tf.boolean_mask(target_seqs, decMasks)
-                label_sum = tf.cast(tf.shape(valid_target_seqs)[0], tf.float32)
+                valid_output_ids = tf.boolean_mask(output_ids, valid_masks)
+                label_sum = tf.cast(tf.shape(valid_output_ids)[0], tf.float32)
                 on_value = 1.0 / label_sum
                 valid_logits = self.speller_matcher(
                     (valid_outputs, None, 'encode'),
                     (self.spellin_embedding, None, 'embed'))
                 valid_labels = tf.one_hot(
-                    valid_target_seqs,
+                    valid_output_ids,
                     tf.shape(self.spellin_embedding)[0],
                     on_value=on_value)
                 valid_post_logits = tf.reshape(valid_logits-valid_prior_logits, [-1])
@@ -578,9 +601,9 @@ class SpellerTrainer(object):
                 return loss
 
             loss = tf.cond(
-                tf.reduce_any(decMasks),
+                tf.reduce_any(valid_masks),
                 true_fn,
-                lambda: tf.zeros([]))
+                lambda: 0.0)
 
         self.reuse=True
 
@@ -834,8 +857,12 @@ class SentGenerator(SeqGenerator):
                         dec_values=(
                             tf.zeros([batch_size, 0, speller_encoder.layer_size]),
                         )*speller_encoder.num_layers)
-                    word_ids, _ = self.word_generator.generate(speller_initial_state, max_word_len)
+                    word_ids, word_scores = self.word_generator.generate(speller_initial_state, max_word_len)
+                    word_scores = tf.exp(word_scores)
                     word_embeds, word_masks = self.word_embedder(word_ids)
+                    word_masks = tf.logical_and(
+                        word_masks,
+                        tf.not_equal(word_scores, 0.0))
                     word_ids = tf.pad(word_ids, [[0,0],[0,0],[0,max_word_len-tf.shape(word_ids)[2]]])
                     return word_embeds, word_ids, word_masks, None
                 candidates_fn_list.append(candidates_fn)
