@@ -257,12 +257,15 @@ class Model(object):
             embedder_dropout = None
 
         input_embedding, spellin_embedding, \
-            field_query_embedding, field_key_embedding, \
-            field_value_embedding, field_context_embedding, \
-            field_word_embedding = get_embeddings(
+        field_query_embedding, \
+        field_key_embedding, \
+        field_value_embedding, \
+        field_context_embedding, \
+        field_word_embedding, \
+        speller_context_embedding = get_embeddings(
             len(self.char_vocab), model_config['char_embed_dim'],
             self.char_vocab.embedding_init, num_layers, layer_size,
-            speller_embed_size, match_size, training=True)
+            match_size, speller_embed_size, speller_match_size, training=True)
 
         word_embedder = Embedder(
             input_embedding, embed_size,
@@ -298,6 +301,7 @@ class Model(object):
         speller_trainer = SpellerTrainer(
             "Speller_Trainer",
             spellin_embedding,
+            speller_context_embedding,
             speller_cell,
             speller_matcher,
             training=True)
@@ -309,8 +313,7 @@ class Model(object):
         sent_trainer = SentTrainer(
             "Sent_Trainer",
             word_cell,
-            word_matcher,
-            speller_trainer,
+            word_trainer,
             training=True)
 
         batch_size = tf.shape(features[0]['seqs'])[0]
@@ -499,12 +502,16 @@ class Model(object):
 
         # prepare attn_matrix
         attn_matrix = []
-        attn_matrix.append([1]*(len(features)+1))
+        attn_matrix_macro = [0]
         for i in features:
             field_id_i = data_index[i]['field_id']
             item_id_i = data_index[i]['item_id']
             group_id_i = data_schema[field_id_i]['group_id']
             target_level_i = task_spec[field_id_i]['target_level']
+            if target_level_i == 0:
+                attn_matrix_macro.append(1)
+            else:
+                attn_matrix_macro.append(0)
             attn_matrix_local = [0]
             for j in features:
                 field_id_j = data_index[j]['field_id']
@@ -522,11 +529,13 @@ class Model(object):
                 else:
                     attn_matrix_local.append(0)
             attn_matrix.append(attn_matrix_local)
+        attn_matrix = [attn_matrix_macro] + attn_matrix
 
         # get encodes
         tfstruct_list = [global_tfstruct] + [features[i]['masked_tfstruct'] for i in features]
         tfstruct_list = encode_tfstructs(word_encoder, tfstruct_list, attn_matrix)
         global_tfstruct = tfstruct_list[0]
+        sample_encodes = tf.squeeze(global_tfstruct.encodes, [1])
         for i in features:
             features[i]['masked_tfstruct'] = tfstruct_list[i+1]
 
@@ -545,6 +554,7 @@ class Model(object):
             token_embeds = data_schema[field_id].get('token_embeds')
             candidate_ids = data_schema[field_id].get('candidate_ids')
             candidate_embeds = data_schema[field_id].get('candidate_embeds')
+            target_seqs = None if candidate_ids is None else feature['seqs']-1
             max_token_length = data_schema[field_id].get('max_token_length')
             target_level = task_spec[field_id]['target_level']
             copy_from = task_spec[field_id].get('copy_from')
@@ -599,11 +609,12 @@ class Model(object):
             # regulation loss
             regulation_loss = word_trainer(
                 limited_vocab,
+                sample_encodes,
                 field_context_embeds, field_word_embeds,
                 feature['segmented_seqs'], feature['word_embeds'],
                 feature['masked_tfstruct'].encodes,
                 feature['word_masks'], feature['pick_masks'],
-                candidate_ids, candidate_embeds, feature['seqs']-1,
+                candidate_ids, candidate_embeds, target_seqs,
                 self_copy_word_ids, self_copy_encodes, self_copy_masks,
             )
             if regulation_losses.get(field_id) is None:
@@ -646,10 +657,11 @@ class Model(object):
                     target_loss = sent_trainer(
                         limited_vocab,
                         initial_state,
+                        sample_encodes,
                         field_context_embeds, field_word_embeds,
                         feature['segmented_seqs'], feature['word_embeds'],
                         feature['word_masks'],
-                        candidate_ids, candidate_embeds, feature['seqs']-1,
+                        candidate_ids, candidate_embeds, target_seqs,
                         copy_word_ids, copy_encodes, copy_masks,
                     )
                 elif feature_type == 'class':
@@ -669,11 +681,12 @@ class Model(object):
                         word_encoder, [tfstruct], [[1,1]], extra_tfstruct_list)[0]
                     target_loss = word_trainer(
                         limited_vocab,
+                        sample_encodes,
                         field_context_embeds, field_word_embeds,
                         feature['segmented_seqs'], feature['word_embeds'],
                         tfstruct.encodes,
                         feature['word_masks'], tf.ones([batch_size, 1], dtype=tf.bool),
-                        candidate_ids, candidate_embeds, feature['seqs']-1,
+                        candidate_ids, candidate_embeds, target_seqs,
                         copy_word_ids, copy_encodes, copy_masks,
                     )
                 else:
@@ -799,12 +812,16 @@ class Model(object):
         speller_num_heads = 4
         speller_match_size = speller_layer_size
 
-        input_embedding, spellin_embedding, field_query_embedding, \
-            field_key_embedding, field_value_embedding, \
-            field_context_embedding, field_word_embedding = get_embeddings(
+        input_embedding, spellin_embedding, \
+        field_query_embedding, \
+        field_key_embedding, \
+        field_value_embedding, \
+        field_context_embedding, \
+        field_word_embedding, \
+        speller_context_embedding = get_embeddings(
             len(self.char_vocab), model_config['char_embed_dim'],
             self.char_vocab.embedding_init, num_layers, layer_size,
-            speller_embed_size, match_size, training=False)
+            match_size, speller_embed_size, speller_match_size, training=False)
 
         word_embedder = Embedder(
             input_embedding, embed_size,
@@ -1306,12 +1323,16 @@ class Model(object):
         speller_num_heads = 4
         speller_match_size = speller_layer_size
 
-        input_embedding, spellin_embedding, field_query_embedding, \
-            field_key_embedding, field_value_embedding, \
-            field_context_embedding, field_word_embedding = get_embeddings(
+        input_embedding, spellin_embedding, \
+        field_query_embedding, \
+        field_key_embedding, \
+        field_value_embedding, \
+        field_context_embedding, \
+        field_word_embedding, \
+        speller_context_embedding = get_embeddings(
             len(self.char_vocab), model_config['char_embed_dim'],
             self.char_vocab.embedding_init, num_layers, layer_size,
-            speller_embed_size, match_size, training=False)
+            match_size, speller_embed_size, speller_match_size, training=False)
 
         word_embedder = Embedder(
             input_embedding, embed_size,
