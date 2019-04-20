@@ -844,12 +844,6 @@ class Model(object):
             speller_encoder,
             dropout=None,
             training=False)
-        speller_trainer = SpellerTrainer(
-            "Speller_Trainer",
-            spellin_embedding,
-            speller_cell,
-            speller_matcher,
-            training=True)
 
         batch_size = tf.shape(features[0]['seqs'])[0]
         max_target_level = max([item['target_level'] for item in task_spec])
@@ -1093,7 +1087,7 @@ class Model(object):
                 feature['masked_tfstruct'].encodes,
                 tf.cast(feature['pick_masks'], tf.int32), 2)
             num_pick_words = tf.shape(pick_word_encodes)[0]
-            item1 = (pick_word_encodes, None, 'encode')
+            item1 = (pick_word_encodes, None, 'context')
 
             def true_fn():
                 # form candidates
@@ -1159,7 +1153,7 @@ class Model(object):
                     match_matrix = tf.cast(match_matrix, tf.float32)
                     match_idxs = tf.argmax(match_matrix, axis=-1, output_type=tf.int32)
                 num_candidates = tf.shape(local_candidate_ids)[0]
-                item2 = (local_candidate_embeds, None, 'embed')
+                item2 = (local_candidate_embeds, None, 'token')
                 word_select_logits = word_matcher(item1, item2)
 
                 # retrieve copy encodes and add copy logits
@@ -1216,7 +1210,7 @@ class Model(object):
                     copy_masks = tf.not_equal(sample_ids, tf.shape(valid_encodes)[0]-1)
                     sample_onehots = tf.one_hot(sample_ids, tf.shape(valid_encodes)[0])
                     candidate_encodes = tf.matmul(sample_onehots, valid_encodes)
-                    item2 = (candidate_encodes, copy_masks, 'encode')
+                    item2 = (candidate_encodes, copy_masks, 'context')
                     word_select_logits += word_matcher(item1, item2)
 
                 # word_select_loss
