@@ -1008,7 +1008,7 @@ class Model(object):
         # loop for target_level
         extra_tfstruct_list = []
         extra_feature_id_list = []
-        for tlevel in range(max_target_level+1):
+        for tlevel in range(0, max_target_level+1):
 
             # gather tfstructs
             tfstruct_list, masked_tfstruct_list, feature_id_list = [], [], []
@@ -1048,7 +1048,25 @@ class Model(object):
                 attn_matrix.append(attn_matrix_local)
 
             # get encodes
-            if len(feature_id_list) > 0:
+            if tlevel == 0:
+                masked_tfstruct_list = [global_tfstruct] + masked_tfstruct_list
+                attn_matrix = [[0]+item for item in attn_matrix]
+                attn_matrix = [[0]+[1]*len(attn_matrix)]+attn_matrix
+                masked_tfstruct_list = encode_tfstructs(
+                    word_encoder, masked_tfstruct_list, attn_matrix)
+                masked_global_tfstruct = masked_tfstruct_list[0]
+                for i, feature_id in enumerate(feature_id_list):
+                    features[feature_id]['masked_tfstruct'] = masked_tfstruct_list[i+1]
+                if max_target_level > 0:
+                    tfstruct_list = [global_tfstruct] + tfstruct_list
+                    tfstruct_list = encode_tfstructs(
+                        word_encoder, tfstruct_list, attn_matrix)
+                    global_tfstruct = tfstruct_list[0]
+                    for i, feature_id in enumerate(feature_id_list):
+                        features[feature_id]['tfstruct'] = tfstruct_list[i+1]
+                    extra_feature_id_list.extend(feature_id_list)
+                    extra_tfstruct_list.extend(tfstruct_list[1:])
+            elif len(feature_id_list) > 0:
                 masked_tfstruct_list = encode_tfstructs(
                     word_encoder, masked_tfstruct_list, attn_matrix, extra_tfstruct_list)
                 for i, feature_id in enumerate(feature_id_list):
@@ -1212,6 +1230,28 @@ class Model(object):
                     candidate_encodes = tf.matmul(sample_onehots, valid_encodes)
                     item2 = (candidate_encodes, copy_masks, 'context')
                     word_select_logits += word_matcher(item1, item2)
+
+                # sample-level logits
+                if target_level == 0:
+                    sample_token_logits = word_matcher(
+                        (tf.squeeze(masked_global_tfstruct.encodes, [1]), None, 'macro'),
+                        (local_candidate_embeds, None, 'token'))
+                    sample_token_logits = tf.tile(
+                        tf.expand_dims(sample_token_logits, axis=1),
+                        [1,feature['seq_length'],1])
+                    sample_token_logits = tf.boolean_mask(
+                        sample_token_logits, feature['pick_masks'])
+                    word_select_logits += sample_token_logits
+                else:
+                    sample_token_logits = word_matcher(
+                        (tf.squeeze(global_tfstruct.encodes, [1]), None, 'macro'),
+                        (local_candidate_embeds, None, 'token'))
+                    sample_token_logits = tf.tile(
+                        tf.expand_dims(sample_token_logits, axis=1),
+                        [1,feature['seq_length'],1])
+                    sample_token_logits = tf.boolean_mask(
+                        sample_token_logits, feature['pick_masks'])
+                    word_select_logits += sample_token_logits
 
                 # word_select_loss
                 word_select_loss = tf.nn.sparse_softmax_cross_entropy_with_logits(
