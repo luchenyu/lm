@@ -1871,7 +1871,7 @@ class Matcher(Module):
         with tf.variable_scope(self.scope, reuse=self.encode_reuse):
 
             if self.cached_encodes.get(encodes) is None:
-                encode_projs = model_utils_py3.GLU(
+                encode_projs = model_utils_py3.fully_connected(
                     encodes,
                     self.layer_size,
                     is_training=self.training,
@@ -1892,7 +1892,7 @@ class Matcher(Module):
         with tf.variable_scope(self.scope, reuse=self.embed_reuse):
 
             if self.cached_embeds.get(embeds) is None:
-                embed_projs = model_utils_py3.GLU(
+                embed_projs = model_utils_py3.fully_connected(
                     embeds,
                     self.layer_size,
                     is_training=self.training,

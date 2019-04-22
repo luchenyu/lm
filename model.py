@@ -242,7 +242,8 @@ class Model(object):
         embed_size = layer_size
         num_layers = model_config['num_layers']
         num_heads = model_config['num_heads']
-        match_size = layer_size
+        word_match_size = 2*layer_size
+        global_match_size = layer_size
         speller_layer_size = int(layer_size/2)
         speller_posit_size = int(speller_layer_size/4)
         speller_embed_size = speller_layer_size
@@ -265,7 +266,7 @@ class Model(object):
         speller_context_embedding = get_embeddings(
             len(self.char_vocab), model_config['char_embed_dim'],
             self.char_vocab.embedding_init, num_layers, layer_size,
-            match_size, speller_embed_size, speller_match_size, training=True)
+            word_match_size, speller_embed_size, speller_match_size, training=True)
 
         word_embedder = Embedder(
             input_embedding, embed_size,
@@ -276,11 +277,11 @@ class Model(object):
             "Word_Encoder",
             dropout=dropout, training=True)
         word_matcher = Matcher(
-            match_size,
+            word_match_size,
             "Word_Matcher",
             dropout=dropout, training=True)
         global_matcher = Matcher(
-            match_size,"Global_Matcher",
+            global_match_size,"Global_Matcher",
             dropout=dropout, training=True)
         word_cell = TransformerCell(
             "Word_Cell",
@@ -808,7 +809,8 @@ class Model(object):
         embed_size = layer_size
         num_layers = model_config['num_layers']
         num_heads = model_config['num_heads']
-        match_size = layer_size
+        word_match_size = 2*layer_size
+        global_match_size = layer_size
         speller_layer_size = int(layer_size/2)
         speller_posit_size = int(speller_layer_size/4)
         speller_embed_size = speller_layer_size
@@ -825,7 +827,7 @@ class Model(object):
         speller_context_embedding = get_embeddings(
             len(self.char_vocab), model_config['char_embed_dim'],
             self.char_vocab.embedding_init, num_layers, layer_size,
-            match_size, speller_embed_size, speller_match_size, training=False)
+            word_match_size, speller_embed_size, speller_match_size, training=False)
 
         word_embedder = Embedder(
             input_embedding, embed_size,
@@ -834,10 +836,10 @@ class Model(object):
             embed_size, posit_size, layer_size, num_layers, num_heads,
             "Word_Encoder", dropout=None, training=False)
         word_matcher = Matcher(
-            match_size,
+            word_match_size,
             "Word_Matcher", dropout=None, training=False)
         global_matcher = Matcher(
-            match_size,"Global_Matcher",
+            global_match_size,"Global_Matcher",
             dropout=None, training=False)
         speller_encoder = Encoder(
             speller_embed_size, speller_posit_size,
@@ -1356,7 +1358,8 @@ class Model(object):
         embed_size = layer_size
         num_layers = model_config['num_layers']
         num_heads = model_config['num_heads']
-        match_size = 2*layer_size
+        word_match_size = 2*layer_size
+        global_match_size = layer_size
         speller_layer_size = int(layer_size/2)
         speller_posit_size = int(speller_layer_size/4)
         speller_embed_size = speller_layer_size
@@ -1373,7 +1376,7 @@ class Model(object):
         speller_context_embedding = get_embeddings(
             len(self.char_vocab), model_config['char_embed_dim'],
             self.char_vocab.embedding_init, num_layers, layer_size,
-            match_size, speller_embed_size, speller_match_size, training=False)
+            word_match_size, speller_embed_size, speller_match_size, training=False)
 
         word_embedder = Embedder(
             input_embedding, embed_size,
@@ -1382,8 +1385,11 @@ class Model(object):
             embed_size, posit_size, layer_size, num_layers, num_heads,
             "Word_Encoder", dropout=None, training=False)
         word_matcher = Matcher(
-            match_size,
+            word_match_size,
             "Word_Matcher", dropout=None, training=False)
+        global_matcher = Matcher(
+            global_match_size,
+            "Global_Matcher", dropout=None, training=False)
         word_cell = TransformerCell("Word_Cell",
                                     word_encoder,
                                     dropout=None,
@@ -1401,8 +1407,10 @@ class Model(object):
                                    training=False)
         word_generator = WordGenerator(speller_cell, speller_matcher, spellin_embedding,
                                        self.char_vocab.token2id[self.char_vocab.sep])
-        sent_generator = SentGenerator(word_cell, word_matcher, word_embedder, word_generator)
-        class_generator = ClassGenerator(word_encoder, word_matcher, word_embedder, word_generator)
+        sent_generator = SentGenerator(
+            word_cell, word_matcher, global_matcher, word_embedder, word_generator)
+        class_generator = ClassGenerator(
+            word_encoder, word_matcher, global_matcher, word_embedder, word_generator)
 
         batch_size = tf.shape(features[0]['seqs'])[0]
         max_target_level = max([item['target_level'] for item in task_spec])
