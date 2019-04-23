@@ -268,66 +268,80 @@ def train_masked(
 
     sample_ids = tf.tile(
         tf.expand_dims(tf.range(batch_size), axis=1), [1,seq_length])
-    grid_x, grid_y = tf.meshgrid(tf.range(seq_length), tf.range(batch_size))
-    grid_ids = tf.stack([grid_y, grid_x], axis=2)
 
-    valid_token_ids = tf.boolean_mask(
+    unique_valid_masks = model_utils_py3.mask_unique_vector(
         token_ids, valid_masks)
-    valid_sample_ids = tf.boolean_mask(
-        sample_ids, valid_masks)
-    valid_grid_ids = tf.boolean_mask(
-        grid_ids, valid_masks)
-    _, valid_token_embeds = tf.dynamic_partition(
-        token_embeds, valid_masks_int, 2)
-    num_valids = tf.shape(valid_token_ids)[0]
+    unique_valid_masks_int = tf.cast(unique_valid_masks, tf.int32)
+    unique_valid_token_ids = tf.boolean_mask(
+        token_ids, unique_valid_masks)
+    _, unique_valid_token_embeds = tf.dynamic_partition(
+        token_embeds, unique_valid_masks_int, 2)
+    num_unique_valids = tf.shape(unique_valid_token_ids)[0]
 
     pick_token_ids = tf.boolean_mask(
         token_ids, pick_masks)
     pick_sample_ids = tf.boolean_mask(
         sample_ids, pick_masks)
-    pick_grid_ids = tf.boolean_mask(
-        grid_ids, pick_masks)
+    pick_sample_onehots = tf.one_hot(
+        pick_sample_ids, batch_size)
     _, pick_encodes = tf.dynamic_partition(
         encodes, pick_masks_int, 2)
-    _, pick_token_embeds = tf.dynamic_partition(
-        token_embeds, pick_masks_int, 2)
     if not target_seqs is None:
         pick_target_seqs = tf.boolean_mask(
             target_seqs, pick_masks)
     num_picks = tf.shape(pick_encodes)[0]
 
-    pick_sample_onehots = tf.one_hot(
-        pick_sample_ids, batch_size, axis=0)
-    pick_sample_labels_sum = tf.reduce_sum(
-        pick_sample_onehots, axis=1, keepdims=True)
-    pick_sample_masks = tf.squeeze(
-        tf.greater(pick_sample_labels_sum, 0), [1])
-    pick_sample_masks_int = tf.cast(
-        pick_sample_masks, tf.int32)
-    pick_sample_labels = pick_sample_onehots / tf.maximum(
-        pick_sample_labels_sum, 1e-12)
-
     if not global_matcher is None:
         # sample latent - local context distribution
         sample_context_logits = global_matcher(
-            (global_encodes, None, 'context'),
-            (pick_encodes, None, 'encode'))
+            (pick_encodes, None, 'encode'),
+            (global_encodes, None, 'context'))
+        sample_context_labels_sum = tf.reduce_sum(
+            pick_sample_onehots)
+        sample_context_labels = pick_sample_onehots * (
+            1.0 / sample_context_labels_sum)
 
-        # sample latent - token distribution
-        sample_token_logits = global_matcher(
-            (global_encodes, None, 'context'),
-            (pick_token_embeds, None, 'embed'))
-
-    # local context - token distribution
+    # local context prior distribution
     context_prior_logits = matcher(
         (pick_encodes, None, 'context'),
         (field_context_embeds, None, 'latent'))
+
     if limited_vocab:
         num_candidates = tf.shape(candidate_ids)[0]
+
+        # local context - token distribution
         match_matrix = tf.one_hot(pick_target_seqs, num_candidates)
+        context_token_labels_sum = tf.reduce_sum(match_matrix)
+        context_token_labels = match_matrix * (
+            1.0 / context_token_labels_sum)
         context_token_logits = matcher(
             (pick_encodes, None, 'context'),
             (candidate_embeds, None, 'embed'))
+
+        # sample latent - token distribution
+        if not global_matcher is None:
+            sample_token_logits = global_matcher(
+                (global_encodes, None, 'context'),
+                (candidate_embeds, None, 'embed'))
+            sample_token_onehots = tf.one_hot(
+                target_seqs, num_candidates,
+                on_value=True, off_value=False)
+            sample_token_onehots = tf.logical_and(
+                sample_token_onehots,
+                tf.expand_dims(valid_masks, axis=2))
+            sample_token_labels = tf.reduce_any(
+                sample_token_onehots, axis=1)
+            sample_token_labels = tf.cast(
+                sample_token_labels, tf.float32)
+            sample_token_labels_sum = tf.reduce_sum(
+                sample_token_labels)
+            sample_token_labels *= 1.0 / sample_token_labels_sum
+
+            context_token_logits += tf.matmul(
+                pick_sample_onehots, sample_token_logits)
+            context_token_logits += tf.reduce_sum(
+                sample_context_logits * pick_sample_onehots,
+                axis=1, keepdims=True)
         context_token_logits -= context_prior_logits
 
         # copy part
@@ -378,60 +392,76 @@ def train_masked(
                 (candidate_encodes, candidate_masks, 'encode'))
 
     else:
+        num_candidates = num_unique_valids
+
+        # token prior distribution
+        match_matrix = model_utils_py3.match_vector(
+            pick_token_ids, unique_valid_token_ids)
+        match_matrix = tf.cast(match_matrix, tf.float32)
         token_prior_logits = matcher(
             (field_token_embeds, None, 'latent'),
-            (valid_token_embeds, None, 'embed'))
+            (unique_valid_token_embeds, None, 'embed'))
 
-        num_candidates = num_valids
+        # local context - token distribution
+        context_token_labels_sum = tf.reduce_sum(match_matrix)
+        context_token_labels = match_matrix * (
+            1.0 / context_token_labels_sum)
         context_token_logits = matcher(
             (pick_encodes, None, 'context'),
-            (valid_token_embeds, None, 'embed'))
+            (unique_valid_token_embeds, None, 'embed'))
+
+        # sample latent - token distribution
+        if not global_matcher is None:
+            sample_token_logits = global_matcher(
+                (global_encodes, None, 'context'),
+                (unique_valid_token_embeds, None, 'embed'))
+            match_matrix = model_utils_py3.match_vector(
+                tf.reshape(token_ids, [batch_size*seq_length, -1]),
+                unique_valid_token_ids)
+            match_matrix = tf.reshape(
+                match_matrix, [batch_size, seq_length, num_unique_valids])
+            match_matrix = tf.logical_and(
+                match_matrix, tf.expand_dims(valid_masks, axis=2))
+            sample_token_labels = tf.cast(
+                tf.reduce_any(match_matrix, axis=1), tf.float32)
+            sample_token_labels_sum = tf.reduce_sum(sample_token_labels)
+            sample_token_labels *= 1.0 / sample_token_labels_sum
+
+            context_token_logits += tf.matmul(
+                pick_sample_onehots, sample_token_logits)
+            context_token_logits += tf.reduce_sum(
+                sample_context_logits * pick_sample_onehots,
+                axis=1, keepdims=True)
         context_token_logits -= token_prior_logits
         context_token_logits -= context_prior_logits
-        match_matrix = model_utils_py3.match_vector(
-            pick_grid_ids, valid_grid_ids)
-        match_matrix = tf.cast(match_matrix, tf.float32)
 
         # copy part
         if not (copy_token_ids is None or copy_encodes is None or copy_masks is None):
-            copy_length = tf.shape(copy_token_ids)[1]
-            token_ids, copy_token_ids = model_utils_py3.pad_vectors(
-                [token_ids, copy_token_ids])
-            # random choose valid copy encodes
             copy_match_matrix = model_utils_py3.match_vector(
                 token_ids, copy_token_ids)
             copy_match_matrix = tf.logical_and(
-                copy_match_matrix,
-                tf.expand_dims(copy_masks, axis=1))
+                copy_match_matrix, tf.expand_dims(copy_masks, axis=1))
             copy_scores = tf.cast(copy_match_matrix, tf.float32)
-            copy_scores_pad = tf.reduce_sum(
-                copy_scores, axis=2, keepdims=True)
-            copy_scores_pad = tf.maximum(copy_scores_pad, 1e-12)
-            copy_scores = tf.concat(
-                [copy_scores, copy_scores_pad], axis=2)
-            copy_scores = tf.log(copy_scores)
-            copy_random_ids = tf.random.categorical(
-                tf.reshape(copy_scores, [batch_size*seq_length, copy_length+1]),
-                1, dtype=tf.int32)
-            copy_random_ids = tf.reshape(
-                copy_random_ids, [batch_size, seq_length])
-            copy_random_onehots = tf.one_hot(
-                copy_random_ids, copy_length+1)
-            copy_encodes = tf.pad(copy_encodes, [[0,0],[0,1],[0,0]])
-            random_copy_encodes = tf.matmul(
-                copy_random_onehots, copy_encodes)
-            _, valid_copy_encodes = tf.dynamic_partition(
-                random_copy_encodes, valid_masks_int, 2)
+            copy_pad_score = tf.reduce_sum(copy_scores, axis=2, keepdims=True)
+            copy_pad_score = tf.maximum(copy_pad_score, 1e-12)
+            copy_scores = tf.concat([copy_scores, copy_pad_score], axis=2)
+            copy_encodes_padded = tf.pad(copy_encodes, [[0,0],[0,1],[0,0]])
+            copy_length = tf.shape(copy_encodes_padded)[1]
+            copy_scores = tf.reshape(
+                copy_scores, [batch_size*seq_length, copy_length])
+            copy_indices = tf.random.categorical(
+                tf.log(copy_scores), 1, dtype=tf.int32)
+            copy_indices = tf.reshape(copy_indices, [batch_size, seq_length])
+            candidate_masks = tf.not_equal(copy_indices, copy_length-1)
+            copy_onehots = tf.one_hot(copy_indices, copy_length)
+            candidate_encodes = tf.matmul(copy_onehots, copy_encodes_padded)
+            _, candidate_encodes = tf.dynamic_partition(
+                candidate_encodes, unique_valid_masks_int, 2)
+            candidate_masks = tf.boolean_mask(
+                candidate_masks, unique_valid_masks)
             context_token_logits += matcher(
                 (pick_encodes, None, 'context'),
-                (valid_copy_encodes, None, 'encode'))
-
-    context_token_labels_sum = tf.reduce_sum(match_matrix)
-    context_token_labels = match_matrix * (1.0/context_token_labels_sum)
-    context_token_logits = tf.reshape(
-        context_token_logits, [num_picks*num_candidates])
-    context_token_labels = tf.reshape(
-        context_token_labels, [num_picks*num_candidates])
+                (candidate_encodes, candidate_masks, 'encode'))
 
     def get_loss():
         # local context prior loss
@@ -447,37 +477,33 @@ def train_masked(
             token_prior_loss = tf.reduce_mean(token_prior_loss)
         if not global_matcher is None:
             # sample latent - local context loss
+            labels = tf.reshape(
+                sample_context_labels, [num_picks*batch_size])
+            logits = tf.reshape(
+                sample_context_logits, [num_picks*batch_size])
             sample_context_loss = tf.nn.softmax_cross_entropy_with_logits_v2(
-                labels=tf.stop_gradient(pick_sample_labels),
-                logits=sample_context_logits)
+                labels=tf.stop_gradient(labels),
+                logits=logits)
+            sample_context_loss -= tf.log(sample_context_labels_sum)
             # sample latent - token loss
+            labels = tf.reshape(
+                sample_token_labels, [batch_size*num_candidates])
+            logits = tf.reshape(
+                sample_token_logits, [batch_size*num_candidates])
             sample_token_loss = tf.nn.softmax_cross_entropy_with_logits_v2(
-                labels=tf.stop_gradient(pick_sample_labels),
-                logits=sample_token_logits)
-            sample_context_loss, sample_token_loss, pick_sample_labels_sum_local = \
-            tf.cond(
-                tf.reduce_all(pick_sample_masks),
-                lambda: (sample_context_loss, sample_token_loss, pick_sample_labels_sum),
-                lambda: (
-                    tf.dynamic_partition(
-                        sample_context_loss, pick_sample_masks_int, 2)[1],
-                    tf.dynamic_partition(
-                        sample_token_loss, pick_sample_masks_int, 2)[1],
-                    tf.boolean_mask(
-                        pick_sample_labels_sum, pick_sample_masks)),
-            )
-            log_pick_sample_labels_sum_local = tf.log(
-                tf.squeeze(pick_sample_labels_sum_local, [1]))
-            sample_context_loss -= log_pick_sample_labels_sum_local
-            sample_context_loss = tf.reduce_mean(sample_context_loss)
-            sample_token_loss -= log_pick_sample_labels_sum_local
-            sample_token_loss = tf.reduce_mean(sample_token_loss)
+                labels=tf.stop_gradient(labels),
+                logits=logits)
+            sample_token_loss -= tf.log(sample_token_labels_sum)
         else:
             sample_context_loss, sample_token_loss = .0, .0
         # local context - token loss
+        logits = tf.reshape(
+            context_token_logits, [num_picks*num_candidates])
+        labels = tf.reshape(
+            context_token_labels, [num_picks*num_candidates])
         context_token_loss = tf.nn.softmax_cross_entropy_with_logits_v2(
-            labels=tf.stop_gradient(context_token_labels),
-            logits=context_token_logits)
+            labels=tf.stop_gradient(labels),
+            logits=logits)
         context_token_loss -= tf.log(context_token_labels_sum)
         # total loss
         loss = context_token_loss + 0.1*(
