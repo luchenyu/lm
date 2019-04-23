@@ -309,6 +309,11 @@ def train_masked(
     if limited_vocab:
         num_candidates = tf.shape(candidate_ids)[0]
 
+        # token prior distribution
+        token_prior_logits = matcher(
+            (field_token_embeds, None, 'latent'),
+            (candidate_embeds, None, 'embed'))
+
         # local context - token distribution
         match_matrix = tf.one_hot(pick_target_seqs, num_candidates)
         context_token_labels_sum = tf.reduce_sum(match_matrix)
@@ -323,6 +328,7 @@ def train_masked(
             sample_token_logits = global_matcher(
                 (global_encodes, None, 'context'),
                 (candidate_embeds, None, 'embed'))
+            sample_token_logits += token_prior_logits
             sample_token_onehots = tf.one_hot(
                 target_seqs, num_candidates,
                 on_value=True, off_value=False)
@@ -395,14 +401,14 @@ def train_masked(
         num_candidates = num_unique_valids
 
         # token prior distribution
-        match_matrix = model_utils_py3.match_vector(
-            pick_token_ids, unique_valid_token_ids)
-        match_matrix = tf.cast(match_matrix, tf.float32)
         token_prior_logits = matcher(
             (field_token_embeds, None, 'latent'),
             (unique_valid_token_embeds, None, 'embed'))
 
         # local context - token distribution
+        match_matrix = model_utils_py3.match_vector(
+            pick_token_ids, unique_valid_token_ids)
+        match_matrix = tf.cast(match_matrix, tf.float32)
         context_token_labels_sum = tf.reduce_sum(match_matrix)
         context_token_labels = match_matrix * (
             1.0 / context_token_labels_sum)
