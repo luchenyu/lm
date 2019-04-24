@@ -1681,15 +1681,24 @@ class Model(object):
                                 axis=0)
                             seqs, scores = sent_generator.generate(
                                 initial_state, max_seq_length, global_encodes,
-                                word_embedding=word_embedding, word_ids=word_ids)
+                                word_embedding, word_ids)
                             feature['seqs'] = seqs[:,0]
                             feature['segs'] = tf.zeros([batch_size, 0])
                             feature['segmented_seqs'] = tf.gather(
                                 token_ids, feature['seqs'])
                         else:
                             if candidate_embeds is None:
+                                sep_ids = tf.constant(
+                                    [[self.char_vocab.token2id[self.char_vocab.sep]]],
+                                    dtype=tf.int32)
+                                sep_ids = tf.pad(
+                                    sep_ids,
+                                    [[0,0],[0,max_token_length-1]])
+                                sep_embeds, _ = word_embedder(tf.expand_dims(sep_ids, axis=0))
+                                sep_embeds = tf.squeeze(sep_embeds, axis=0)
                                 seqs, scores = sent_generator.generate(
                                     initial_state, max_seq_length, global_encodes,
+                                    sep_embeds, sep_ids,
                                     gen_word_len=max_token_length)
                             else:
                                 unk_ids = tf.constant(
@@ -1698,9 +1707,18 @@ class Model(object):
                                 unk_ids = tf.pad(
                                     unk_ids,
                                     [[0,0],[0,tf.shape(candidate_ids)[1]-1]])
+                                sep_ids = tf.constant(
+                                    [[self.char_vocab.token2id[self.char_vocab.sep]]],
+                                    dtype=tf.int32)
+                                sep_ids = tf.pad(
+                                    sep_ids,
+                                    [[0,0],[0,tf.shape(candidate_ids)[1]-1]])
                                 unk_masks = tf.reduce_all(
                                     tf.equal(candidate_ids, unk_ids), axis=1)
-                                valid_masks = tf.logical_not(unk_masks)
+                                sep_masks = tf.reduce_all(
+                                    tf.equal(candidate_ids, sep_ids), axis=1)
+                                valid_masks = tf.logical_not(
+                                    tf.logical_or(unk_masks, sep_masks))
                                 candidate_ids = tf.boolean_mask(candidate_ids, valid_masks)
                                 candidate_embeds = tf.boolean_mask(candidate_embeds, valid_masks)
                                 sep_ids = tf.constant(
@@ -1717,8 +1735,7 @@ class Model(object):
                                     [sep_ids, candidate_ids], axis=0)
                                 seqs, scores = sent_generator.generate(
                                     initial_state, max_seq_length, global_encodes,
-                                    word_embedding=candidate_embeds,
-                                    word_ids=candidate_ids)
+                                    candidate_embeds, candidate_ids)
                             feature['segmented_seqs'] = seqs[:,0]
                             feature['seqs'], feature['segs'] = model_utils_py3.stitch_chars(
                                 feature['segmented_seqs'])

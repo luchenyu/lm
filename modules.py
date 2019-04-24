@@ -309,11 +309,6 @@ def train_masked(
     if limited_vocab:
         num_candidates = tf.shape(candidate_ids)[0]
 
-        # token prior distribution
-        token_prior_logits = matcher(
-            (field_token_embeds, None, 'latent'),
-            (candidate_embeds, None, 'embed'))
-
         # local context - token distribution
         match_matrix = tf.one_hot(pick_target_seqs, num_candidates)
         context_token_labels_sum = tf.reduce_sum(match_matrix)
@@ -325,6 +320,9 @@ def train_masked(
 
         # sample latent - token distribution
         if not global_matcher is None:
+            token_prior_logits = matcher(
+                (field_token_embeds, None, 'latent'),
+                (candidate_embeds, None, 'embed'))
             sample_token_logits = global_matcher(
                 (global_encodes, None, 'context'),
                 (candidate_embeds, None, 'embed'))
@@ -852,9 +850,9 @@ class WordGenerator(object):
             [tf.range(sep_id, dtype=tf.int32), 
              tf.range(sep_id+1, tf.shape(spellin_embedding)[0], dtype=tf.int32)],
             axis=0)
-        speller_matcher.cache_tokens(self.nosep_embedding)
+        speller_matcher.cache_embeds(self.nosep_embedding)
         self.decoder = lambda *args: model_utils_py3.stochastic_beam_dec(
-            *args, beam_size=16, num_candidates=16, cutoff_size=8, gamma=1.0)
+            *args, beam_size=8, num_candidates=4, cutoff_size=4, gamma=1.0)
 
     def generate(
         self,
@@ -918,23 +916,24 @@ class SentGenerator(object):
         self.word_embedder = word_embedder
         self.word_generator = word_generator
         self.decoder = lambda *args: model_utils_py3.stochastic_beam_dec(
-            *args, beam_size=4, num_candidates=1, cutoff_size=4, gamma=4.0)
+            *args, beam_size=4, num_candidates=1, cutoff_size=4, gamma=8.0)
 
     def generate(
         self,
         initial_state,
         length,
         global_encodes,
-        gen_word_len=None, word_embedding=None, word_ids=None,
+        word_embedding, word_ids,
+        gen_word_len=None,
         copy_embeds=None, copy_ids=None, copy_masks=None, copy_encodes=None):
         """
         args:
             initial_state: TransformerState
             length:
             global_encodes: batch_size x encode_dim
-            gen_word_len: int
             word_embedding: num_words x embed_dim
             word_ids: num_words, no sep when in char mode, first one is sep when in word mode
+            gen_word_len: int
             copy_embeds: batch_size x num_words x embed_dim
             copy_ids: batch_size x num_words [x word_len]
             copy_masks: batch_size x num_words
@@ -967,47 +966,48 @@ class SentGenerator(object):
             max_word_len = tf.maximum(max_word_len, tf.shape(copy_ids)[-1])
 
         global_latents = self.global_matcher.cache_contexts(global_encodes)
+
+        start_id = word_ids[0]
+        start_embedding = word_embedding[0]
+        # static vocab
+        if len(word_ids.get_shape()) == 2:
+            word_ids = tf.pad(
+                word_ids, [[0,0],[0,max_word_len-tf.shape(word_ids)[1]]])
+        self.global_matcher.cache_embeds(word_embedding)
+        self.word_matcher.cache_embeds(word_embedding)
+        sample_token_logits = self.global_matcher(
+            (global_encodes, None, 'context'),
+            (word_embedding, None, 'embed'))
+        def candidates_fn(encodes):
+            encode_dim = encodes.get_shape()[-1].value
+            encodes_reshaped = tf.reshape(
+                encodes, [batch_size, -1, encode_dim])
+            beam_size = tf.shape(encodes_reshaped)[1]
+            sample_token_logits_tiled = tf.tile(
+                tf.expand_dims(sample_token_logits, axis=1),
+                [1,beam_size,1])
+            sample_context_logits = self.global_matcher(
+                (encodes_reshaped, None, 'encode'),
+                (tf.expand_dims(global_latents, axis=1), None, 'latent'))
+            context_token_logits = self.word_matcher(
+                (encodes, None, 'context'),
+                (word_embedding, None, 'embed'))
+            sample_level_logits = tf.reshape(
+                sample_token_logits_tiled + sample_context_logits,
+                [batch_size*beam_size, -1])
+            logits = context_token_logits + sample_level_logits
+            return word_embedding, word_ids, None, logits
+        candidates_fn_list.append(candidates_fn)
+
+        # dynamic gen
         if not gen_word_len is None:
-
-            # first sep token
-            sep_ids = tf.constant([[self.word_generator.sep_id]], dtype=tf.int32)
-            sep_embedding, _ = self.word_embedder(tf.expand_dims(sep_ids, axis=0))
-            sep_embedding = tf.squeeze(sep_embedding, [0])
-            sep_ids = tf.pad(sep_ids, [[0,0],[0,max_word_len-1]])
-            self.global_matcher.cache_embeds(sep_embedding)
-            self.word_matcher.cache_embeds(sep_embedding)
-            sample_token_logits = self.global_matcher(
-                (global_encodes, None, 'context'),
-                (sep_embedding, None, 'embed'))
-            def candidates_fn(encodes):
-                encode_dim = encodes.get_shape()[-1].value
-                encodes_reshaped = tf.reshape(
-                    encodes, [batch_size, -1, encode_dim])
-                beam_size = tf.shape(encodes_reshaped)[1]
-                sample_token_logits_tiled = tf.tile(
-                    tf.expand_dims(sample_token_logits, axis=1),
-                    [1,beam_size,1])
-                sample_context_logits = self.global_matcher(
-                    (encodes_reshaped, None, 'encode'),
-                    (tf.expand_dims(global_latents, axis=1), None, 'latent'))
-                context_token_logits = self.word_matcher(
-                    (encodes, None, 'context'),
-                    (sep_embedding, None, 'embed'))
-                sample_level_logits = tf.reshape(
-                    sample_token_logits_tiled + sample_context_logits,
-                    [batch_size*beam_size, 1])
-                logits = context_token_logits + sample_level_logits
-                return sep_embedding, sep_ids, None, logits
-            candidates_fn_list.append(candidates_fn)
-
-            # dynamic gen
             def candidates_fn(encodes):
                 encode_dim = encodes.get_shape()[-1].value
                 batch_beam_size = tf.shape(encodes)[0]
                 encodes_reshaped = tf.reshape(
                     encodes, [batch_size, -1, encode_dim])
                 beam_size = tf.shape(encodes_reshaped)[1]
-                speller_encoder = self.word_generator.cell.assets['encoder']
+                speller_encoder = self.word_generator.speller_cell.assets['encoder']
                 null_tfstruct = model_utils_py3.init_tfstruct(
                     batch_beam_size, speller_encoder.embed_size, speller_encoder.posit_size,
                     speller_encoder.layer_size, speller_encoder.num_layers)
@@ -1054,46 +1054,6 @@ class SentGenerator(object):
                     context_token_logits, [1])
                 logits = sample_context_logits + sample_token_logits + context_token_logits
                 return word_embeds, word_ids, word_masks, logits
-            candidates_fn_list.append(candidates_fn)
-
-            start_id = tf.squeeze(sep_ids, [0])
-            start_embedding = tf.squeeze(sep_embedding, [0])
-
-        else:
-
-            start_id = tf.cast(0, tf.int32)
-            start_embedding = word_embedding[0]
-            assert(not(word_embedding is None or word_ids is None))
-
-        # static vocab
-        if not (word_embedding is None or word_ids is None):
-            if len(word_ids.get_shape()) == 2:
-                word_ids = tf.pad(
-                    word_ids, [[0,0],[0,max_word_len-tf.shape(word_ids)[1]]])
-            self.global_matcher.cache_embeds(word_embedding)
-            self.word_matcher.cache_embeds(word_embedding)
-            sample_token_logits = self.global_matcher(
-                (global_encodes, None, 'context'),
-                (word_embedding, None, 'embed'))
-            def candidates_fn(encodes):
-                encode_dim = encodes.get_shape()[-1].value
-                encodes_reshaped = tf.reshape(
-                    encodes, [batch_size, -1, encode_dim])
-                beam_size = tf.shape(encodes_reshaped)[1]
-                sample_token_logits_tiled = tf.tile(
-                    tf.expand_dims(sample_token_logits, axis=1),
-                    [1,beam_size,1])
-                sample_context_logits = self.global_matcher(
-                    (encodes_reshaped, None, 'encode'),
-                    (tf.expand_dims(global_latents, axis=1), None, 'latent'))
-                context_token_logits = self.word_matcher(
-                    (encodes, None, 'context'),
-                    (word_embedding, None, 'embed'))
-                sample_level_logits = tf.reshape(
-                    sample_token_logits_tiled + sample_context_logits,
-                    [batch_size*beam_size, -1])
-                logits = context_token_logits + sample_level_logits
-                return word_embedding, word_ids, None, logits
             candidates_fn_list.append(candidates_fn)
 
         # copy
@@ -1212,7 +1172,8 @@ class ClassGenerator(object):
                  tfstruct,
                  extra_tfstruct,
                  global_encodes,
-                 gen_word_len=None, word_embedding=None, word_ids=None,
+                 word_embedding=None, word_ids=None,
+                 gen_word_len=None,
                  copy_embeds=None, copy_ids=None, copy_masks=None, copy_encodes=None):
         """
         args:
@@ -1233,6 +1194,22 @@ class ClassGenerator(object):
         word_encodes = tfstruct.encodes
         word_encodes = tf.squeeze(word_encodes, [1])
         global_latents = self.global_matcher.cache_contexts(global_encodes)
+
+        # static vocab
+        if not (word_embedding is None or word_ids is None):
+            if len(word_ids.get_shape()) == 2:
+                word_ids = tf.pad(
+                    word_ids, [[0,0],[0,max_word_len-tf.shape(word_ids)[1]]])
+            sample_token_logits = self.global_matcher(
+                (global_encodes, None, 'context'),
+                (word_embedding, None, 'embed'))
+            def candidates_fn(encodes):
+                context_token_logits = self.word_matcher(
+                    (encodes, None, 'context'),
+                    (word_embedding, None, 'embed'))
+                logits = sample_token_logits + context_token_logits
+                return word_embedding, word_ids, None, logits
+            candidates_fn_list.append(candidates_fn)
 
         # dynamic gen
         if not gen_word_len is None:
@@ -1268,22 +1245,6 @@ class ClassGenerator(object):
                     (word_embeds, None, 'embed'))
                 logits = tf.squeeze(sample_token_logits+context_token_logits, [1])
                 return word_embeds, word_ids, word_masks, logits
-            candidates_fn_list.append(candidates_fn)
-
-        # static vocab
-        if not (word_embedding is None or word_ids is None):
-            if len(word_ids.get_shape()) == 2:
-                word_ids = tf.pad(
-                    word_ids, [[0,0],[0,max_word_len-tf.shape(word_ids)[1]]])
-            sample_token_logits = self.global_matcher(
-                (global_encodes, None, 'context'),
-                (word_embedding, None, 'embed'))
-            def candidates_fn(encodes):
-                context_token_logits = self.word_matcher(
-                    (encodes, None, 'context'),
-                    (word_embedding, None, 'embed'))
-                logits = sample_token_logits + context_token_logits
-                return word_embedding, word_ids, None, logits
             candidates_fn_list.append(candidates_fn)
 
         # copy
