@@ -326,7 +326,6 @@ def train_masked(
             sample_token_logits = global_matcher(
                 (global_encodes, None, 'context'),
                 (candidate_embeds, None, 'embed'))
-            sample_token_logits += token_prior_logits
             sample_token_onehots = tf.one_hot(
                 target_seqs, num_candidates,
                 on_value=True, off_value=False)
@@ -341,12 +340,11 @@ def train_masked(
                 sample_token_labels)
             sample_token_labels *= 1.0 / sample_token_labels_sum
 
-            context_token_logits += tf.matmul(
-                pick_sample_onehots, sample_token_logits)
-            context_token_logits += tf.reduce_sum(
+            sample_token_logits += tf.stop_gradient(token_prior_logits)
+            context_token_logits -= tf.stop_gradient(tf.reduce_sum(
                 sample_context_logits * pick_sample_onehots,
-                axis=1, keepdims=True)
-        context_token_logits -= context_prior_logits
+                axis=1, keepdims=True))
+        context_token_logits -= tf.stop_gradient(context_prior_logits)
 
         # copy part
         if not (copy_token_ids is None or copy_encodes is None or copy_masks is None):
@@ -431,13 +429,15 @@ def train_masked(
             sample_token_labels_sum = tf.reduce_sum(sample_token_labels)
             sample_token_labels *= 1.0 / sample_token_labels_sum
 
-            context_token_logits += tf.matmul(
-                pick_sample_onehots, sample_token_logits)
-            context_token_logits += tf.reduce_sum(
+            context_token_logits -= tf.stop_gradient(tf.log(
+                tf.reduce_sum(
+                    tf.exp(sample_token_logits)*sample_token_labels,
+                    axis=0, keepdims=True)))
+            context_token_logits -= tf.stop_gradient(tf.reduce_sum(
                 sample_context_logits * pick_sample_onehots,
-                axis=1, keepdims=True)
-        context_token_logits -= token_prior_logits
-        context_token_logits -= context_prior_logits
+                axis=1, keepdims=True))
+        context_token_logits -= tf.stop_gradient(token_prior_logits)
+        context_token_logits -= tf.stop_gradient(context_prior_logits)
 
         # copy part
         if not (copy_token_ids is None or copy_encodes is None or copy_masks is None):
@@ -659,7 +659,7 @@ class WordTrainer(object):
                 tf.reduce_any(pick_masks),
                 get_speller_loss,
                 lambda: 0.0)
-            return speller_loss
+            return 0.5*speller_loss
         self.speller_loss_fn = speller_loss_fn
 
     def __call__(

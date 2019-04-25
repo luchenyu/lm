@@ -1241,26 +1241,26 @@ class Model(object):
                     word_select_logits += word_matcher(item1, item2)
 
                 # sample-level logits
-                if target_level == 0:
-                    sample_token_logits = global_matcher(
-                        (tf.squeeze(masked_global_tfstruct.encodes, [1]), None, 'context'),
-                        (local_candidate_embeds, None, 'embed'))
-                    sample_token_logits = tf.tile(
-                        tf.expand_dims(sample_token_logits, axis=1),
-                        [1,feature['seq_length'],1])
-                    sample_token_logits = tf.boolean_mask(
-                        sample_token_logits, feature['pick_masks'])
-                    word_select_logits += sample_token_logits
-                else:
-                    sample_token_logits = global_matcher(
-                        (tf.squeeze(global_tfstruct.encodes, [1]), None, 'context'),
-                        (local_candidate_embeds, None, 'embed'))
-                    sample_token_logits = tf.tile(
-                        tf.expand_dims(sample_token_logits, axis=1),
-                        [1,feature['seq_length'],1])
-                    sample_token_logits = tf.boolean_mask(
-                        sample_token_logits, feature['pick_masks'])
-                    word_select_logits += sample_token_logits
+#                 if target_level == 0:
+#                     sample_token_logits = global_matcher(
+#                         (tf.squeeze(masked_global_tfstruct.encodes, [1]), None, 'context'),
+#                         (local_candidate_embeds, None, 'embed'))
+#                     sample_token_logits = tf.tile(
+#                         tf.expand_dims(sample_token_logits, axis=1),
+#                         [1,feature['seq_length'],1])
+#                     sample_token_logits = tf.boolean_mask(
+#                         sample_token_logits, feature['pick_masks'])
+#                     word_select_logits += sample_token_logits
+#                 else:
+#                     sample_token_logits = global_matcher(
+#                         (tf.squeeze(global_tfstruct.encodes, [1]), None, 'context'),
+#                         (local_candidate_embeds, None, 'embed'))
+#                     sample_token_logits = tf.tile(
+#                         tf.expand_dims(sample_token_logits, axis=1),
+#                         [1,feature['seq_length'],1])
+#                     sample_token_logits = tf.boolean_mask(
+#                         sample_token_logits, feature['pick_masks'])
+#                     word_select_logits += sample_token_logits
 
                 # word_select_loss
                 word_select_loss = tf.nn.sparse_softmax_cross_entropy_with_logits(
