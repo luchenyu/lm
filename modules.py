@@ -269,6 +269,15 @@ def train_masked(
     sample_ids = tf.tile(
         tf.expand_dims(tf.range(batch_size), axis=1), [1,seq_length])
 
+    unique_valid_masks = model_utils_py3.mask_unique_vector(
+        token_ids, valid_masks)
+    unique_valid_masks_int = tf.cast(unique_valid_masks, tf.int32)
+    unique_valid_token_ids = tf.boolean_mask(
+        token_ids, unique_valid_masks)
+    _, unique_valid_token_embeds = tf.dynamic_partition(
+        token_embeds, unique_valid_masks_int, 2)
+    num_unique_valids = tf.shape(unique_valid_token_ids)[0]
+
     pick_token_ids = tf.boolean_mask(
         token_ids, pick_masks)
     pick_sample_ids = tf.boolean_mask(
@@ -313,6 +322,7 @@ def train_masked(
 
     if limited_vocab:
         num_candidates = tf.shape(candidate_ids)[0]
+        num_candidates_more = num_candidates
 
         # local context - token distribution
         context_token_labels = tf.one_hot(pick_target_seqs, num_candidates)
@@ -356,9 +366,16 @@ def train_masked(
             sample_token_labels *= 1.0 / sample_token_labels_sum
 
             sample_token_logits += tf.stop_gradient(token_prior_logits)
-            context_token_logits -= tf.stop_gradient(tf.log(tf.reduce_sum(
-                tf.exp(sample_context_logits),
-                axis=1, keepdims=True)))
+            context_token_logits += tf.stop_gradient(
+                tf.matmul(pick_sample_onehots, sample_token_logits))
+            context_token_logits += tf.stop_gradient(
+                tf.reduce_sum(
+                    pick_sample_onehots * sample_context_logits,
+                    axis=1, keepdims=True))
+            context_token_logits -= tf.stop_gradient(
+                tf.log(tf.reduce_sum(
+                    tf.exp(sample_context_logits),
+                    axis=1, keepdims=True)))
         context_token_logits -= tf.stop_gradient(context_prior_logits)
 
         # copy part
@@ -410,6 +427,7 @@ def train_masked(
 
     else:
         num_candidates = num_unique_picks
+        num_candidates_more = num_unique_valids
 
         # token prior distribution
         token_prior_logits = matcher(
@@ -418,17 +436,20 @@ def train_masked(
         token_prior_labels = tf.ones_like(token_prior_logits)
         token_prior_labels_sum = tf.reduce_sum(token_prior_labels)
         token_prior_labels *= 1.0/token_prior_labels_sum
+        token_prior_logits_more = matcher(
+            (field_token_embeds, None, 'latent'),
+            (unique_valid_token_embeds, None, 'embed'))
 
         # local context - token distribution
         context_token_labels = model_utils_py3.match_vector(
-            pick_token_ids, unique_pick_token_ids)
+            pick_token_ids, unique_valid_token_ids)
         context_token_labels = tf.cast(
             context_token_labels, tf.float32)
         context_token_labels_sum = tf.reduce_sum(context_token_labels)
         context_token_labels *= 1.0/context_token_labels_sum
         context_token_logits = matcher(
             (pick_encodes, None, 'context'),
-            (unique_pick_token_embeds, None, 'embed'))
+            (unique_valid_token_embeds, None, 'embed'))
 
         if not global_matcher is None:
             # sample latent - token distribution
@@ -446,15 +467,25 @@ def train_masked(
                 tf.reduce_any(sample_token_labels, axis=1), tf.float32)
             sample_token_labels_sum = tf.reduce_sum(sample_token_labels)
             sample_token_labels *= 1.0 / sample_token_labels_sum
+            sample_token_logits_more = global_matcher(
+                (global_encodes, None, 'context'),
+                (unique_valid_token_embeds, None, 'embed'))
 
-            context_token_logits -= tf.stop_gradient(tf.log(
+            context_token_logits += tf.stop_gradient(
+                tf.matmul(pick_sample_onehots, sample_token_logits_more))
+            context_token_logits += tf.stop_gradient(
                 tf.reduce_sum(
-                    tf.exp(sample_token_logits),
+                    pick_sample_onehots * sample_context_logits,
+                    axis=1, keepdims=True))
+            context_token_logits -= tf.stop_gradient(
+                tf.log(tf.reduce_sum(
+                    tf.exp(sample_token_logits_more),
                     axis=0, keepdims=True)))
-            context_token_logits -= tf.stop_gradient(tf.log(tf.reduce_sum(
-                tf.exp(sample_context_logits),
-                axis=1, keepdims=True)))
-        context_token_logits -= tf.stop_gradient(token_prior_logits)
+            context_token_logits -= tf.stop_gradient(
+                tf.log(tf.reduce_sum(
+                    tf.exp(sample_context_logits),
+                    axis=1, keepdims=True)))
+        context_token_logits -= tf.stop_gradient(token_prior_logits_more)
         context_token_logits -= tf.stop_gradient(context_prior_logits)
 
         # copy part
@@ -478,9 +509,9 @@ def train_masked(
             copy_onehots = tf.one_hot(copy_indices, copy_length)
             candidate_encodes = tf.matmul(copy_onehots, copy_encodes_padded)
             _, candidate_encodes = tf.dynamic_partition(
-                candidate_encodes, unique_pick_masks_int, 2)
+                candidate_encodes, unique_valid_masks_int, 2)
             candidate_masks = tf.boolean_mask(
-                candidate_masks, unique_pick_masks)
+                candidate_masks, unique_valid_masks)
             context_token_logits += matcher(
                 (pick_encodes, None, 'context'),
                 (candidate_encodes, candidate_masks, 'encode'))
@@ -526,9 +557,9 @@ def train_masked(
             sample_context_loss, sample_token_loss = .0, .0
         # local context - token loss
         logits = tf.reshape(
-            context_token_logits, [num_picks*num_candidates])
+            context_token_logits, [num_picks*num_candidates_more])
         labels = tf.reshape(
-            context_token_labels, [num_picks*num_candidates])
+            context_token_labels, [num_picks*num_candidates_more])
         context_token_loss = tf.nn.softmax_cross_entropy_with_logits_v2(
             labels=tf.stop_gradient(labels),
             logits=logits)
