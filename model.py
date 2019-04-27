@@ -1198,13 +1198,14 @@ class Model(object):
                             copy_encodes.append(features[j]['tfstruct'].encodes)
                             copy_valid_masks.append(features[j]['tfstruct'].masks)
                     # first we get the matrix indicates whether x copy to y
-                    copy_segmented_seqs = model_utils_py3.pad_vectors(
-                        copy_segmented_seqs)
-                    copy_segmented_seqs = tf.concat(copy_segmented_seqs, axis=1)
+                    all_segmented_seqs = model_utils_py3.pad_vectors(
+                        copy_segmented_seqs + [feature['segmented_seqs']])
+                    copy_segmented_seqs = tf.concat(all_segmented_seqs[:-1], axis=1)
+                    current_segmented_seqs = all_segmented_seqs[-1]
                     copy_encodes = tf.concat(copy_encodes, axis=1)
                     copy_valid_masks = tf.concat(copy_valid_masks, axis=1)
                     copy_match_matrix = model_utils_py3.match_vector(
-                        copy_segmented_seqs, feature['segmented_seqs'])
+                        copy_segmented_seqs, current_segmented_seqs)
                     copy_match_matrix = tf.logical_and(
                         copy_match_matrix, tf.expand_dims(feature['pick_masks'], 1))
                     copy_match_matrix = tf.logical_and(

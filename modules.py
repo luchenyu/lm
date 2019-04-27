@@ -525,8 +525,9 @@ def train_masked(
                 (candidate_encodes, candidate_masks, 'encode'))
 
     pick_token_sample_ids = tf.concat(
-        [pick_token_ids, pick_sample_ids], axis=1)
-    pick_match_matrix = match_vector(
+        [pick_token_ids, tf.expand_dims(pick_sample_ids, axis=1)],
+        axis=1)
+    pick_match_matrix = model_utils_py3.match_vector(
         pick_token_sample_ids, pick_token_sample_ids)
     pick_match_matrix = tf.cast(pick_match_matrix, tf.float32)
     pick_scale = 1.0/tf.reduce_sum(pick_match_matrix, axis=1, keepdims=True)
@@ -797,7 +798,7 @@ class SentTrainer(object):
                 limited_vocab,
                 field_context_embeds, field_word_embeds,
                 word_ids, word_embeds, valid_masks,
-                global_encodes,
+                global_encodes, self.word_trainer.global_matcher,
                 candidate_ids, candidate_embeds, target_seqs,
                 copy_word_ids, copy_encodes, copy_masks,
                 extra_loss_fn=speller_loss_fn,
