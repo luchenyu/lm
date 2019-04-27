@@ -326,8 +326,6 @@ def train_masked(
 
         # local context - token distribution
         context_token_labels = tf.one_hot(pick_target_seqs, num_candidates)
-        context_token_labels_sum = tf.reduce_sum(context_token_labels)
-        context_token_labels *= 1.0/context_token_labels_sum
         context_token_logits = matcher(
             (pick_encodes, None, 'context'),
             (candidate_embeds, None, 'embed'))
@@ -389,6 +387,11 @@ def train_masked(
                 copy_score_matrix, tf.expand_dims(pick_masks, axis=1))
             copy_score_matrix = tf.logical_and(
                 copy_score_matrix, tf.expand_dims(copy_masks, axis=2))
+            label_masks = tf.reduce_any(copy_score_matrix, axis=1)
+            label_masks = tf.boolean_mask(label_masks, pick_masks)
+            label_masks = tf.expand_dims(
+                1.0 - 0.7*tf.cast(label_masks, tf.float32), axis=1)
+            context_token_labels *= label_masks
             # calculate the normalized prob each slot being copied
             copy_scores = tf.cast(copy_score_matrix, tf.float32)
             copy_scores /= (tf.reduce_sum(copy_scores, axis=1, keepdims=True)+1e-12)
@@ -445,8 +448,6 @@ def train_masked(
             pick_token_ids, unique_valid_token_ids)
         context_token_labels = tf.cast(
             context_token_labels, tf.float32)
-        context_token_labels_sum = tf.reduce_sum(context_token_labels)
-        context_token_labels *= 1.0/context_token_labels_sum
         context_token_logits = matcher(
             (pick_encodes, None, 'context'),
             (unique_valid_token_embeds, None, 'embed'))
@@ -490,10 +491,17 @@ def train_masked(
 
         # copy part
         if not (copy_token_ids is None or copy_encodes is None or copy_masks is None):
+            token_ids, copy_token_ids = model_utils_py3.pad_vectors(
+                [token_ids, copy_token_ids])
             copy_match_matrix = model_utils_py3.match_vector(
                 token_ids, copy_token_ids)
             copy_match_matrix = tf.logical_and(
                 copy_match_matrix, tf.expand_dims(copy_masks, axis=1))
+            label_masks = tf.reduce_any(
+                copy_match_matrix, axis=2, keepdims=True)
+            label_masks = tf.boolean_mask(label_masks, pick_masks)
+            label_masks = 1.0 - 0.7*tf.cast(label_masks, tf.float32)
+            context_token_labels *= label_masks
             copy_scores = tf.cast(copy_match_matrix, tf.float32)
             copy_pad_score = tf.reduce_sum(copy_scores, axis=2, keepdims=True)
             copy_pad_score = tf.maximum(copy_pad_score, 1e-12)
@@ -515,6 +523,16 @@ def train_masked(
             context_token_logits += matcher(
                 (pick_encodes, None, 'context'),
                 (candidate_encodes, candidate_masks, 'encode'))
+
+    pick_token_sample_ids = tf.concat(
+        [pick_token_ids, pick_sample_ids], axis=1)
+    pick_match_matrix = match_vector(
+        pick_token_sample_ids, pick_token_sample_ids)
+    pick_match_matrix = tf.cast(pick_match_matrix, tf.float32)
+    pick_scale = 1.0/tf.reduce_sum(pick_match_matrix, axis=1, keepdims=True)
+    context_token_labels *= pick_scale
+    context_token_labels_sum = tf.reduce_sum(context_token_labels)
+    context_token_labels *= 1.0/context_token_labels_sum
 
     def get_loss():
         # local context prior loss
@@ -563,7 +581,7 @@ def train_masked(
         context_token_loss = tf.nn.softmax_cross_entropy_with_logits_v2(
             labels=tf.stop_gradient(labels),
             logits=logits)
-        context_token_loss -= tf.log(context_token_labels_sum)
+        context_token_loss += tf.reduce_sum(labels*tf.log(labels+1e-12))
         # total loss
         loss = context_token_loss + 0.1*(
             sample_context_loss+sample_token_loss+context_prior_loss+token_prior_loss)

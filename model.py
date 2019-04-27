@@ -544,6 +544,24 @@ class Model(object):
         for i in features:
             features[i]['masked_tfstruct'] = tfstruct_list[i+1]
 
+        # all non-target level fields
+        non_target_word_ids, non_target_encodes, non_target_masks = [], [], []
+        for i, feature in features.items():
+            field_id = data_index[i]['field_id']
+            target_level = task_spec[field_id]['target_level']
+            if target_level == 0:
+                non_target_word_ids.append(feature['segmented_seqs'])
+                non_target_encodes.append(feature['masked_tfstruct'].encodes)
+                non_target_masks.append(feature['masked_tfstruct'].masks)
+        if len(non_target_word_ids) > 0:
+            non_target_word_ids = model_utils_py3.pad_vectors(
+                non_target_word_ids)
+            non_target_word_ids = tf.concat(non_target_word_ids, axis=1)
+            non_target_encodes = tf.concat(non_target_encodes, axis=1)
+            non_target_masks = tf.concat(non_target_masks, axis=1)
+        else:
+            non_target_word_ids, non_target_encodes, non_target_masks = None, None, None
+
         # get the loss of each feature
         regulation_losses = {}
         target_losses = {}
@@ -572,59 +590,42 @@ class Model(object):
             field_context_embeds = tf.nn.embedding_lookup(
                 field_context_embedding, [field_id+1,])
             field_word_embeds = tf.nn.embedding_lookup(
-                field_word_embedding, [field_id+1,])
-            copy_word_ids, copy_encodes, copy_masks = [],[],[]
-            for j in features:
-                if data_index[j]['field_id'] in copy_from and i != j:
-                    copy_word_ids.append(features[j]['segmented_seqs'])
-                    copy_encodes.append(features[j]['masked_tfstruct'].encodes)
-                    copy_masks.append(features[j]['masked_tfstruct'].masks)
-            if len(copy_word_ids) > 0:
-                copy_word_ids = model_utils_py3.pad_vectors(
-                    copy_word_ids)
-                copy_word_ids = tf.concat(copy_word_ids, axis=1)
-                copy_encodes = tf.concat(copy_encodes, axis=1)
-                copy_masks = tf.concat(copy_masks, axis=1)
+                    field_word_embedding, [field_id+1,])
+            if target_level == 0:
+                copy_word_ids = non_target_word_ids
+                copy_encodes = non_target_encodes
+                copy_masks = non_target_masks
             else:
-                copy_word_ids, copy_encodes, copy_masks = None, None, None
-            if feature_type == 'sequence':
-                if not copy_word_ids is None:
-                    self_copy_word_ids = tf.concat(
-                        model_utils_py3.pad_vectors([feature['segmented_seqs'], copy_word_ids]),
-                        axis=1)
-                    self_copy_encodes = tf.concat(
-                        [feature['masked_tfstruct'].encodes, copy_encodes],
-                        axis=1)
-                    self_copy_masks = tf.concat(
-                        [feature['masked_tfstruct'].masks, copy_masks],
-                        axis=1)
+                copy_word_ids, copy_encodes, copy_masks = [],[],[]
+                for j in features:
+                    if data_index[j]['field_id'] in copy_from and i != j:
+                        copy_word_ids.append(features[j]['segmented_seqs'])
+                        copy_encodes.append(features[j]['masked_tfstruct'].encodes)
+                        copy_masks.append(features[j]['masked_tfstruct'].masks)
+                if len(copy_word_ids) > 0:
+                    copy_word_ids = model_utils_py3.pad_vectors(
+                        copy_word_ids)
+                    copy_word_ids = tf.concat(copy_word_ids, axis=1)
+                    copy_encodes = tf.concat(copy_encodes, axis=1)
+                    copy_masks = tf.concat(copy_masks, axis=1)
                 else:
-                    self_copy_word_ids = feature['segmented_seqs']
-                    self_copy_encodes = feature['masked_tfstruct'].encodes
-                    self_copy_masks = feature['masked_tfstruct'].masks
-            elif feature_type == 'class':
-                self_copy_word_ids = copy_word_ids
-                self_copy_encodes = copy_encodes
-                self_copy_masks = copy_masks
-            else:
-                self_copy_word_ids = None
-                self_copy_encodes = None
-                self_copy_masks = None
+                    copy_word_ids, copy_encodes, copy_masks = None, None, None
 
             # regulation loss
-            regulation_loss = word_trainer(
-                limited_vocab,
-                field_context_embeds, field_word_embeds,
-                feature['segmented_seqs'], feature['word_embeds'],
-                feature['masked_tfstruct'].encodes,
-                feature['word_masks'], feature['pick_masks'],
-                global_encodes,
-                candidate_ids, candidate_embeds, target_seqs,
-                self_copy_word_ids, self_copy_encodes, self_copy_masks,
-            )
-            if regulation_losses.get(field_id) is None:
-                regulation_losses[field_id] = []
-            regulation_losses[field_id].append(regulation_loss)
+            if target_level == 0:
+                regulation_loss = word_trainer(
+                    limited_vocab,
+                    field_context_embeds, field_word_embeds,
+                    feature['segmented_seqs'], feature['word_embeds'],
+                    feature['masked_tfstruct'].encodes,
+                    feature['word_masks'], feature['pick_masks'],
+                    global_encodes,
+                    candidate_ids, candidate_embeds, target_seqs,
+                    copy_word_ids, copy_encodes, copy_masks,
+                )
+                if regulation_losses.get(field_id) is None:
+                    regulation_losses[field_id] = []
+                regulation_losses[field_id].append(regulation_loss)
 
             # target loss
             if target_level > 0:
@@ -701,11 +702,14 @@ class Model(object):
                 target_losses[field_id].append(target_loss)
 
         # gather losses
-        loss_regulation = tf.reduce_mean(
-            tf.stack(
-                [tf.reduce_mean(
-                    tf.stack(regulation_losses[key], axis=0)) for key in regulation_losses],
-                axis=0))
+        if len(regulation_losses) > 0:
+            loss_regulation = tf.reduce_mean(
+                tf.stack(
+                    [tf.reduce_mean(
+                        tf.stack(regulation_losses[key], axis=0)) for key in regulation_losses],
+                    axis=0))
+        else:
+            loss_regulation = .0
         if len(target_losses) == 0:
             loss_train = loss_regulation
             loss_show = loss_regulation
@@ -1186,24 +1190,23 @@ class Model(object):
                 # retrieve copy encodes and add copy logits
                 if len(copy_from) > 0:
                     copy_segmented_seqs, copy_encodes, \
-                        copy_valid_masks, copy_pick_masks = [],[],[],[]
+                        copy_valid_masks = [],[],[]
                     for j in features:
-                        if data_index[j]['field_id'] in copy_from:
+                        field_id_j = data_index[j]['field_id']
+                        if field_id_j in copy_from and i != j:
                             copy_segmented_seqs.append(features[j]['segmented_seqs'])
-                            copy_encodes.append(features[j]['masked_tfstruct'].encodes)
-                            copy_valid_masks.append(features[j]['masked_tfstruct'].masks)
-                            copy_pick_masks.append(features[j]['pick_masks'])
+                            copy_encodes.append(features[j]['tfstruct'].encodes)
+                            copy_valid_masks.append(features[j]['tfstruct'].masks)
                     # first we get the matrix indicates whether x copy to y
                     copy_segmented_seqs = model_utils_py3.pad_vectors(
                         copy_segmented_seqs)
                     copy_segmented_seqs = tf.concat(copy_segmented_seqs, axis=1)
                     copy_encodes = tf.concat(copy_encodes, axis=1)
                     copy_valid_masks = tf.concat(copy_valid_masks, axis=1)
-                    copy_pick_masks = tf.concat(copy_pick_masks, axis=1)
                     copy_match_matrix = model_utils_py3.match_vector(
-                        copy_segmented_seqs, copy_segmented_seqs)
+                        copy_segmented_seqs, feature['segmented_seqs'])
                     copy_match_matrix = tf.logical_and(
-                        copy_match_matrix, tf.expand_dims(copy_pick_masks, 1))
+                        copy_match_matrix, tf.expand_dims(feature['pick_masks'], 1))
                     copy_match_matrix = tf.logical_and(
                         copy_match_matrix, tf.expand_dims(copy_valid_masks, 2))
                     # calculate the normalized prob each slot being copied
