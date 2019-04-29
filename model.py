@@ -608,6 +608,16 @@ class Model(object):
                     copy_word_ids = tf.concat(copy_word_ids, axis=1)
                     copy_encodes = tf.concat(copy_encodes, axis=1)
                     copy_masks = tf.concat(copy_masks, axis=1)
+                    sep_ids = tf.constant(
+                        [[[self.char_vocab.token2id[self.char_vocab.sep]]]],
+                        dtype=tf.int32)
+                    sep_ids = tf.pad(
+                        sep_ids,
+                        [[0,0],[0,0],[0,tf.shape(copy_word_ids)[2]-1]])
+                    nosep_masks = tf.reduce_any(
+                        tf.not_equal(copy_word_ids, sep_ids),
+                        axis=2)
+                    copy_masks = tf.logical_and(copy_masks, nosep_masks)
                 else:
                     copy_word_ids, copy_encodes, copy_masks = None, None, None
 
@@ -743,7 +753,13 @@ class Model(object):
             hyper_params.get('pct_start'),
             hyper_params.get('wd'))
         if self.isFreeze:
-            var_list = [field_query_embedding, field_key_embedding, field_value_embedding]
+            var_list = [
+                field_query_embedding,
+                field_key_embedding,
+                field_value_embedding,
+                field_context_embedding,
+                field_token_embedding,
+            ]
         else:
             var_list = None
         train_op = model_utils_py3.optimize_loss(
@@ -1254,7 +1270,7 @@ class Model(object):
                         [1,feature['seq_length'],1])
                     sample_token_logits = tf.boolean_mask(
                         sample_token_logits, feature['pick_masks'])
-                    word_select_logits += sample_token_logits
+                    word_select_logits += 0.1*sample_token_logits
                 else:
                     sample_token_logits = global_matcher(
                         (tf.squeeze(global_tfstruct.encodes, [1]), None, 'context'),
@@ -1264,7 +1280,7 @@ class Model(object):
                         [1,feature['seq_length'],1])
                     sample_token_logits = tf.boolean_mask(
                         sample_token_logits, feature['pick_masks'])
-                    word_select_logits += sample_token_logits
+                    word_select_logits += 0.1*sample_token_logits
 
                 # word_select_loss
                 word_select_loss = tf.nn.sparse_softmax_cross_entropy_with_logits(
@@ -1622,6 +1638,7 @@ class Model(object):
 
                 if target_level == tlevel:
                     extra_tfstruct_list, extra_feature_id_list = [], []
+                    copy_embeds, copy_ids, copy_masks, copy_encodes = [], [], [], []
                     for j in features:
                         field_id_j = data_index[j]['field_id']
                         item_id_j = data_index[j]['item_id']
@@ -1636,10 +1653,27 @@ class Model(object):
                         else:
                             extra_tfstruct_list.append(features[j]['tfstruct'])
                             extra_feature_id_list.append(j)
+                            if field_id_j in copy_from:
+                                copy_embeds.append(features[j]['word_embeds'])
+                                if limited_vocab:
+                                    copy_ids.append(features[j]['seqs'])
+                                else:
+                                    copy_ids.append(features[j]['segmented_seqs'])
+                                copy_masks.append(features[j]['word_masks'])
+                                copy_encodes.append(features[j]['tfstruct'].encodes)
                     if len(extra_tfstruct_list) > 0:
                         extra_tfstruct = model_utils_py3.concat_tfstructs(extra_tfstruct_list)
                     else:
                         extra_tfstruct = null_tfstruct
+                    if len(copy_embeds) > 0:
+                        copy_embeds = tf.concat(copy_embeds, axis=1)
+                        copy_masks = tf.concat(copy_masks, axis=1)
+                        copy_encodes = tf.concat(copy_encodes, axis=1)
+                        if not limited_vocab:
+                            copy_ids = model_utils_py3.pad_vectors(copy_ids)
+                        copy_ids = tf.concat(copy_ids, axis=1)
+                    else:
+                        copy_embeds, copy_ids, copy_masks, copy_encodes = None, None, None, None
 
                     # generate
                     if feature_type == 'sequence':
@@ -1683,9 +1717,14 @@ class Model(object):
                                 [word_ids[sep_id-1:sep_id],
                                  word_ids[:sep_id-1], word_ids[sep_id:]],
                                 axis=0)
+                            if not copy_ids is None:
+                                nosep_masks = tf.not_equal(copy_ids, sep_id)
+                                copy_masks = tf.logical_and(copy_masks, nosep_masks)
                             seqs, scores = sent_generator.generate(
                                 initial_state, max_seq_length, global_encodes,
-                                word_embedding, word_ids)
+                                word_embedding, word_ids,
+                                copy_embeds=copy_embeds, copy_ids=copy_ids,
+                                copy_masks=copy_masks, copy_encodes=copy_encodes)
                             feature['seqs'] = seqs[:,0]
                             feature['segs'] = tf.zeros([batch_size, 0])
                             feature['segmented_seqs'] = tf.gather(
@@ -1700,10 +1739,22 @@ class Model(object):
                                     [[0,0],[0,max_token_length-1]])
                                 sep_embeds, _ = word_embedder(tf.expand_dims(sep_ids, axis=0))
                                 sep_embeds = tf.squeeze(sep_embeds, axis=0)
+                                if not copy_ids is None:
+                                    copy_ids = tf.pad(
+                                        copy_ids,
+                                        [[0,0],[0,0],[0,max_token_length-tf.shape(copy_ids)[2]]])
+                                    copy_ids = copy_ids[:,:,:max_token_length]
+                                    nosep_masks = tf.reduce_any(
+                                        tf.not_equal(
+                                            copy_ids, tf.expand_dims(sep_ids, axis=0)),
+                                        axis=-1)
+                                    copy_masks = tf.logical_and(copy_masks, nosep_masks)
                                 seqs, scores = sent_generator.generate(
                                     initial_state, max_seq_length, global_encodes,
                                     sep_embeds, sep_ids,
-                                    gen_word_len=max_token_length)
+                                    gen_word_len=max_token_length,
+                                    copy_embeds=copy_embeds, copy_ids=copy_ids,
+                                    copy_masks=copy_masks, copy_encodes=copy_encodes)
                             else:
                                 unk_ids = tf.constant(
                                     [[self.char_vocab.token2id[self.char_vocab.unk]]],
@@ -1737,9 +1788,21 @@ class Model(object):
                                     [sep_embeds, candidate_embeds], axis=0)
                                 candidate_ids = tf.concat(
                                     [sep_ids, candidate_ids], axis=0)
+                                if not copy_ids is None:
+                                    copy_ids = tf.pad(
+                                        copy_ids,
+                                        [[0,0],[0,0],[0,tf.shape(candidate_ids)[1]-tf.shape(copy_ids)[2]]])
+                                    copy_ids = copy_ids[:,:,:tf.shape(candidate_ids)[1]]
+                                    nosep_masks = tf.reduce_any(
+                                        tf.not_equal(
+                                            copy_ids, tf.expand_dims(sep_ids, axis=0)),
+                                        axis=-1)
+                                    copy_masks = tf.logical_and(copy_masks, nosep_masks)
                                 seqs, scores = sent_generator.generate(
                                     initial_state, max_seq_length, global_encodes,
-                                    candidate_embeds, candidate_ids)
+                                    candidate_embeds, candidate_ids,
+                                    copy_embeds=copy_embeds, copy_ids=copy_ids,
+                                    copy_masks=copy_masks, copy_encodes=copy_encodes)
                             feature['segmented_seqs'] = seqs[:,0]
                             feature['seqs'], feature['segs'] = model_utils_py3.stitch_chars(
                                 feature['segmented_seqs'])
@@ -1778,7 +1841,9 @@ class Model(object):
                             word_ids = tf.range(1, tf.shape(word_embedding)[0]+1, dtype=tf.int32)
                             classes, scores = class_generator.generate(
                                 tfstruct, extra_tfstruct, global_encodes,
-                                word_embedding=word_embedding, word_ids=word_ids)
+                                word_embedding=word_embedding, word_ids=word_ids,
+                                copy_embeds=copy_embeds, copy_ids=copy_ids,
+                                copy_masks=copy_masks, copy_encodes=copy_encodes)
                             feature['seqs'] = classes[:,0]
                             feature['segs'] = tf.zeros([batch_size, 0])
                             feature['segmented_seqs'] = tf.gather(
@@ -1787,7 +1852,9 @@ class Model(object):
                             if candidate_embeds is None:
                                 classes, scores = class_generator.generate(
                                     tfstruct, extra_tfstruct, global_encodes,
-                                    gen_word_len=max_token_len)
+                                    gen_word_len=max_token_len,
+                                    copy_embeds=copy_embeds, copy_ids=copy_ids,
+                                    copy_masks=copy_masks, copy_encodes=copy_encodes)
                             else:
                                 unk_ids = tf.constant(
                                     [[self.char_vocab.token2id[self.char_vocab.unk]]],
@@ -1802,7 +1869,9 @@ class Model(object):
                                 candidate_embeds = tf.boolean_mask(candidate_embeds, valid_masks)
                                 classes, scores = class_generator.generate(
                                     tfstruct, extra_tfstruct, global_encodes,
-                                    word_embedding=candidate_embeds, word_ids=candidate_ids)
+                                    word_embedding=candidate_embeds, word_ids=candidate_ids,
+                                    copy_embeds=copy_embeds, copy_ids=copy_ids,
+                                    copy_masks=copy_masks, copy_encodes=copy_encodes)
                             feature['segmented_seqs'] = seqs[:,0]
                             feature['seqs'], feature['segs'] = model_utils_py3.stitch_chars(
                                 feature['segmented_seqs'])

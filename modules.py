@@ -307,10 +307,13 @@ def train_masked(
         sample_context_logits = global_matcher(
             (tf.stop_gradient(pick_encodes), None, 'encode'),
             (global_encodes, None, 'context'))
+        label_scale = tf.reduce_sum(
+            pick_sample_onehots, axis=0, keepdims=True)
+        label_scale = 1.0 / tf.maximum(label_scale, 1e-12)
+        sample_context_labels = pick_sample_onehots*label_scale
         sample_context_labels_sum = tf.reduce_sum(
-            pick_sample_onehots)
-        sample_context_labels = pick_sample_onehots * (
-            1.0 / sample_context_labels_sum)
+            sample_context_labels)
+        sample_context_labels *= 1.0 / sample_context_labels_sum
 
     # local context prior distribution
     context_prior_logits = matcher(
@@ -359,21 +362,25 @@ def train_masked(
                 sample_token_onehots, axis=1)
             sample_token_labels = tf.cast(
                 sample_token_labels, tf.float32)
+            label_scale1 = tf.reduce_sum(
+                sample_token_labels, axis=0, keepdims=True)
+            label_scale1 = 1.0 / tf.maximum(label_scale1, 1e-12)
+            label_scale2 = tf.reduce_sum(
+                sample_token_labels, axis=1, keepdims=True)
+            label_scale2 = 1.0 / tf.maximum(label_scale2, 1e-12)
+            sample_token_labels *= label_scale1
+            sample_token_labels *= label_scale2
             sample_token_labels_sum = tf.reduce_sum(
                 sample_token_labels)
             sample_token_labels *= 1.0 / sample_token_labels_sum
 
             sample_token_logits += tf.stop_gradient(token_prior_logits)
-            context_token_logits += tf.stop_gradient(
+            context_token_logits += 0.1*tf.stop_gradient(
                 tf.matmul(pick_sample_onehots, sample_token_logits))
-            context_token_logits += tf.stop_gradient(
+            context_token_logits += 0.1*tf.stop_gradient(
                 tf.reduce_sum(
                     pick_sample_onehots * sample_context_logits,
                     axis=1, keepdims=True))
-            context_token_logits -= tf.stop_gradient(
-                tf.log(tf.reduce_sum(
-                    tf.exp(sample_context_logits),
-                    axis=1, keepdims=True)))
         context_token_logits -= tf.stop_gradient(context_prior_logits)
 
         # copy part
@@ -387,11 +394,6 @@ def train_masked(
                 copy_score_matrix, tf.expand_dims(pick_masks, axis=1))
             copy_score_matrix = tf.logical_and(
                 copy_score_matrix, tf.expand_dims(copy_masks, axis=2))
-            label_masks = tf.reduce_any(copy_score_matrix, axis=1)
-            label_masks = tf.boolean_mask(label_masks, pick_masks)
-            label_masks = tf.expand_dims(
-                1.0 - 0.7*tf.cast(label_masks, tf.float32), axis=1)
-            context_token_labels *= label_masks
             # calculate the normalized prob each slot being copied
             copy_scores = tf.cast(copy_score_matrix, tf.float32)
             copy_scores /= (tf.reduce_sum(copy_scores, axis=1, keepdims=True)+1e-12)
@@ -410,8 +412,8 @@ def train_masked(
             copy_valid_matrix = tf.cast(copy_valid_matrix, tf.float32)
             copy_valid_match_scores = copy_valid_matrix * tf.expand_dims(
                 copy_valid_scores+1e-12, axis=0)
-            # copy / no copy is 1:1
-            copy_valid_pad_score = tf.reduce_sum(
+            # copy / no copy is not 1:1
+            copy_valid_pad_score = 0.1*tf.reduce_sum(
                 copy_valid_match_scores, axis=1, keepdims=True)
             copy_valid_pad_score = tf.maximum(copy_valid_pad_score, 1e-12)
             copy_valid_match_scores = tf.concat(
@@ -466,26 +468,26 @@ def train_masked(
                 sample_token_labels, tf.expand_dims(pick_masks, axis=2))
             sample_token_labels = tf.cast(
                 tf.reduce_any(sample_token_labels, axis=1), tf.float32)
+            label_scale1 = tf.reduce_sum(
+                sample_token_labels, axis=0, keepdims=True)
+            label_scale1 = 1.0 / tf.maximum(label_scale1, 1e-12)
+            label_scale2 = tf.reduce_sum(
+                sample_token_labels, axis=1, keepdims=True)
+            label_scale2 = 1.0 / tf.maximum(label_scale2, 1e-12)
+            sample_token_labels *= label_scale1
+            sample_token_labels *= label_scale2
             sample_token_labels_sum = tf.reduce_sum(sample_token_labels)
             sample_token_labels *= 1.0 / sample_token_labels_sum
             sample_token_logits_more = global_matcher(
                 (global_encodes, None, 'context'),
                 (unique_valid_token_embeds, None, 'embed'))
 
-            context_token_logits += tf.stop_gradient(
+            context_token_logits += 0.1*tf.stop_gradient(
                 tf.matmul(pick_sample_onehots, sample_token_logits_more))
-            context_token_logits += tf.stop_gradient(
+            context_token_logits += 0.1*tf.stop_gradient(
                 tf.reduce_sum(
                     pick_sample_onehots * sample_context_logits,
                     axis=1, keepdims=True))
-            context_token_logits -= tf.stop_gradient(
-                tf.log(tf.reduce_sum(
-                    tf.exp(sample_token_logits_more),
-                    axis=0, keepdims=True)))
-            context_token_logits -= tf.stop_gradient(
-                tf.log(tf.reduce_sum(
-                    tf.exp(sample_context_logits),
-                    axis=1, keepdims=True)))
         context_token_logits -= tf.stop_gradient(token_prior_logits_more)
         context_token_logits -= tf.stop_gradient(context_prior_logits)
 
@@ -497,13 +499,8 @@ def train_masked(
                 token_ids, copy_token_ids)
             copy_match_matrix = tf.logical_and(
                 copy_match_matrix, tf.expand_dims(copy_masks, axis=1))
-            label_masks = tf.reduce_any(
-                copy_match_matrix, axis=2, keepdims=True)
-            label_masks = tf.boolean_mask(label_masks, pick_masks)
-            label_masks = 1.0 - 0.7*tf.cast(label_masks, tf.float32)
-            context_token_labels *= label_masks
             copy_scores = tf.cast(copy_match_matrix, tf.float32)
-            copy_pad_score = tf.reduce_sum(copy_scores, axis=2, keepdims=True)
+            copy_pad_score = 0.1*tf.reduce_sum(copy_scores, axis=2, keepdims=True)
             copy_pad_score = tf.maximum(copy_pad_score, 1e-12)
             copy_scores = tf.concat([copy_scores, copy_pad_score], axis=2)
             copy_encodes_padded = tf.pad(copy_encodes, [[0,0],[0,1],[0,0]])
@@ -524,14 +521,10 @@ def train_masked(
                 (pick_encodes, None, 'context'),
                 (candidate_encodes, candidate_masks, 'encode'))
 
-    pick_token_sample_ids = tf.concat(
-        [pick_token_ids, tf.expand_dims(pick_sample_ids, axis=1)],
-        axis=1)
-    pick_match_matrix = model_utils_py3.match_vector(
-        pick_token_sample_ids, pick_token_sample_ids)
-    pick_match_matrix = tf.cast(pick_match_matrix, tf.float32)
-    pick_scale = 1.0/tf.reduce_sum(pick_match_matrix, axis=1, keepdims=True)
-    context_token_labels *= pick_scale
+    label_scale = tf.reduce_sum(
+        context_token_labels, axis=0, keepdims=True)
+    label_scale = 1.0 / tf.maximum(label_scale, 1e-12)
+    context_token_labels *= label_scale
     context_token_labels_sum = tf.reduce_sum(context_token_labels)
     context_token_labels *= 1.0/context_token_labels_sum
 
@@ -733,7 +726,7 @@ class WordTrainer(object):
                 tf.reduce_any(pick_masks),
                 get_speller_loss,
                 lambda: 0.0)
-            return 0.5*speller_loss
+            return 1.0*speller_loss
         self.speller_loss_fn = speller_loss_fn
 
     def __call__(
@@ -926,7 +919,7 @@ class WordGenerator(object):
             axis=0)
         speller_matcher.cache_embeds(self.nosep_embedding)
         self.decoder = lambda *args: model_utils_py3.stochastic_beam_dec(
-            *args, beam_size=8, num_candidates=4, cutoff_size=4, gamma=1.0)
+            *args, beam_size=8, num_candidates=4, cutoff_rate=0.1, gamma=1.0)
 
     def generate(
         self,
@@ -989,8 +982,8 @@ class SentGenerator(object):
         self.global_matcher = global_matcher
         self.word_embedder = word_embedder
         self.word_generator = word_generator
-        self.decoder = lambda *args: model_utils_py3.stochastic_beam_dec(
-            *args, beam_size=4, num_candidates=1, cutoff_size=4, gamma=8.0)
+        self.decoder = lambda *args: model_utils_py3.beam_dec(
+            *args, beam_size=4, num_candidates=1, cutoff_rate=0.1, gamma=8.0)
 
     def generate(
         self,
@@ -1069,7 +1062,7 @@ class SentGenerator(object):
             sample_level_logits = tf.reshape(
                 sample_token_logits_tiled + sample_context_logits,
                 [batch_size*beam_size, -1])
-            logits = context_token_logits + sample_level_logits
+            logits = context_token_logits + 0.1*sample_level_logits
             return word_embedding, word_ids, None, logits
         candidates_fn_list.append(candidates_fn)
 
@@ -1104,7 +1097,7 @@ class SentGenerator(object):
                 word_ids = tf.pad(word_ids, [[0,0],[0,0],[0,max_word_len-tf.shape(word_ids)[2]]])
                 num_candidates = tf.shape(word_ids)[1]
 
-                sample_token_logits = self.global_matcher(
+                sample_token_logits_local = self.global_matcher(
                     (tf.reshape(
                         word_embeds,
                         [batch_size, beam_size*num_candidates, self.word_embedder.layer_size]),
@@ -1112,8 +1105,8 @@ class SentGenerator(object):
                     (tf.expand_dims(
                         global_latents, axis=1),
                      None, 'latent'))
-                sample_token_logits = tf.reshape(
-                    sample_token_logits, [batch_size*beam_size, num_candidates])
+                sample_token_logits_local = tf.reshape(
+                    sample_token_logits_local, [batch_size*beam_size, num_candidates])
                 sample_context_logits = self.global_matcher(
                     (encodes_reshaped, None, 'encode'),
                     (tf.expand_dims(
@@ -1121,12 +1114,13 @@ class SentGenerator(object):
                      None, 'latent'))
                 sample_context_logits = tf.reshape(
                     sample_context_logits, [batch_size*beam_size, 1])
+                sample_level_logits = sample_context_logits + sample_token_logits_local
                 context_token_logits = self.word_matcher(
                     (tf.expand_dims(encodes, axis=1), None, 'context'),
                     (word_embeds, None, 'embed'))
                 context_token_logits = tf.squeeze(
                     context_token_logits, [1])
-                logits = sample_context_logits + sample_token_logits + context_token_logits
+                logits = context_token_logits + 0.1*sample_level_logits
                 return word_embeds, word_ids, word_masks, logits
             candidates_fn_list.append(candidates_fn)
 
@@ -1139,7 +1133,7 @@ class SentGenerator(object):
             self.global_matcher.cache_embeds(copy_embeds)
             copy_embed_projs = self.word_matcher.cache_embeds(copy_embeds)
             copy_encode_projs = self.word_matcher.cache_encodes(copy_encodes)
-            sample_token_logits = self.global_matcher(
+            sample_token_logits_copy = self.global_matcher(
                 (tf.expand_dims(global_latents, axis=1), None, 'latent'),
                 (copy_embeds, None, 'embed'))
             def candidates_fn(encodes):
@@ -1148,7 +1142,7 @@ class SentGenerator(object):
                     encodes, [batch_size, -1, encode_dim])
                 beam_size = tf.shape(encodes_reshaped)[1]
                 sample_token_logits_tiled = tf.tile(
-                    sample_token_logits, [1,beam_size,1])
+                    sample_token_logits_copy, [1,beam_size,1])
                 sample_context_logits = self.global_matcher(
                     (encodes_reshaped, None, 'encode'),
                     (tf.expand_dims(global_latents, axis=1), None, 'latent'))
@@ -1196,7 +1190,7 @@ class SentGenerator(object):
                     [batch_size*beam_size, num_copies, self.word_matcher.layer_size])
                 encodes_expanded = tf.expand_dims(encodes, axis=1)
                 context_token_logits = self.word_matcher(
-                    (encodes_expanded, None, 'context')
+                    (encodes_expanded, None, 'context'),
                     (copy_embed_projs_tiled, None, 'latent'))
                 copy_logits = self.word_matcher(
                     (encodes_expanded, None, 'context'),
@@ -1204,7 +1198,7 @@ class SentGenerator(object):
                 context_token_logits += copy_logits
                 context_token_logits = tf.squeeze(
                     context_token_logits, [1])
-                logits = context_token_logits + sample_level_logits
+                logits = context_token_logits + 0.1*sample_level_logits
                 return copy_embeds_tiled, copy_ids_tiled, copy_masks_tiled, logits
             candidates_fn_list.append(candidates_fn)
 
@@ -1281,7 +1275,7 @@ class ClassGenerator(object):
                 context_token_logits = self.word_matcher(
                     (encodes, None, 'context'),
                     (word_embedding, None, 'embed'))
-                logits = sample_token_logits + context_token_logits
+                logits = 0.1*sample_token_logits + context_token_logits
                 return word_embedding, word_ids, None, logits
             candidates_fn_list.append(candidates_fn)
 
@@ -1317,7 +1311,7 @@ class ClassGenerator(object):
                 context_token_logits = self.word_matcher(
                     (tf.expand_dims(encodes, axis=1), None, 'context'),
                     (word_embeds, None, 'embed'))
-                logits = tf.squeeze(sample_token_logits+context_token_logits, [1])
+                logits = tf.squeeze(0.1*sample_token_logits+context_token_logits, [1])
                 return word_embeds, word_ids, word_masks, logits
             candidates_fn_list.append(candidates_fn)
 
@@ -1329,7 +1323,7 @@ class ClassGenerator(object):
             def candidates_fn(encodes):
                 encodes_expanded = tf.expand_dims(encodes, axis=1)
                 context_token_logits = self.word_matcher(
-                    (encodes_expanded, None, 'context')
+                    (encodes_expanded, None, 'context'),
                     (copy_embeds, None, 'embed'))
                 copy_logits = self.word_matcher(
                     (encodes_expanded, None, 'context'),
@@ -1337,7 +1331,7 @@ class ClassGenerator(object):
                 context_token_logits += copy_logits
                 context_token_logits = tf.squeeze(
                     context_token_logits, [1])
-                logits = context_token_logits + sample_token_logits
+                logits = context_token_logits + 0.1*sample_token_logits
                 logits += tf.log(tf.cast(copy_masks, tf.float32))
                 return copy_embeds, copy_ids, copy_masks, logits
             candidates_fn_list.append(candidates_fn)
