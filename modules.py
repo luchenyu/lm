@@ -362,14 +362,10 @@ def train_masked(
                 sample_token_onehots, axis=1)
             sample_token_labels = tf.cast(
                 sample_token_labels, tf.float32)
-            label_scale1 = tf.reduce_sum(
-                sample_token_labels, axis=0, keepdims=True)
-            label_scale1 = 1.0 / tf.maximum(label_scale1, 1e-12)
-            label_scale2 = tf.reduce_sum(
+            label_scale = tf.reduce_sum(
                 sample_token_labels, axis=1, keepdims=True)
-            label_scale2 = 1.0 / tf.maximum(label_scale2, 1e-12)
-            sample_token_labels *= label_scale1
-            sample_token_labels *= label_scale2
+            label_scale = 1.0 / tf.maximum(label_scale, 1e-12)
+            sample_token_labels *= label_scale
             sample_token_labels_sum = tf.reduce_sum(
                 sample_token_labels)
             sample_token_labels *= 1.0 / sample_token_labels_sum
@@ -468,14 +464,10 @@ def train_masked(
                 sample_token_labels, tf.expand_dims(pick_masks, axis=2))
             sample_token_labels = tf.cast(
                 tf.reduce_any(sample_token_labels, axis=1), tf.float32)
-            label_scale1 = tf.reduce_sum(
-                sample_token_labels, axis=0, keepdims=True)
-            label_scale1 = 1.0 / tf.maximum(label_scale1, 1e-12)
-            label_scale2 = tf.reduce_sum(
+            label_scale = tf.reduce_sum(
                 sample_token_labels, axis=1, keepdims=True)
-            label_scale2 = 1.0 / tf.maximum(label_scale2, 1e-12)
-            sample_token_labels *= label_scale1
-            sample_token_labels *= label_scale2
+            label_scale = 1.0 / tf.maximum(label_scale, 1e-12)
+            sample_token_labels *= label_scale
             sample_token_labels_sum = tf.reduce_sum(sample_token_labels)
             sample_token_labels *= 1.0 / sample_token_labels_sum
             sample_token_logits_more = global_matcher(
@@ -521,9 +513,13 @@ def train_masked(
                 (pick_encodes, None, 'context'),
                 (candidate_encodes, candidate_masks, 'encode'))
 
-    label_scale = tf.reduce_sum(
-        context_token_labels, axis=0, keepdims=True)
-    label_scale = 1.0 / tf.maximum(label_scale, 1e-12)
+    pick_token_sample_ids = tf.concat(
+        [pick_token_ids, tf.expand_dims(pick_sample_ids, axis=1)],
+        axis=1)
+    pick_match_matrix = model_utils_py3.match_vector(
+        pick_token_sample_ids, pick_token_sample_ids)
+    pick_match_matrix = tf.cast(pick_match_matrix, tf.float32)
+    label_scale = 1.0/tf.reduce_sum(pick_match_matrix, axis=1, keepdims=True)
     context_token_labels *= label_scale
     context_token_labels_sum = tf.reduce_sum(context_token_labels)
     context_token_labels *= 1.0/context_token_labels_sum
