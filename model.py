@@ -559,6 +559,16 @@ class Model(object):
             non_target_word_ids = tf.concat(non_target_word_ids, axis=1)
             non_target_encodes = tf.concat(non_target_encodes, axis=1)
             non_target_masks = tf.concat(non_target_masks, axis=1)
+            sep_ids = tf.constant(
+                [[[self.char_vocab.token2id[self.char_vocab.sep]]]],
+                dtype=tf.int32)
+            sep_ids = tf.pad(
+                sep_ids,
+                [[0,0],[0,0],[0,tf.shape(non_target_word_ids)[2]-1]])
+            nosep_masks = tf.reduce_any(
+                tf.not_equal(non_target_word_ids, sep_ids),
+                axis=2)
+            non_target_masks = tf.logical_and(non_target_masks, nosep_masks)
         else:
             non_target_word_ids, non_target_encodes, non_target_masks = None, None, None
 
