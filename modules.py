@@ -555,7 +555,7 @@ def train_masked(
             sample_context_loss = tf.nn.softmax_cross_entropy_with_logits_v2(
                 labels=tf.stop_gradient(labels),
                 logits=logits)
-            sample_context_loss -= tf.log(sample_context_labels_sum)
+            sample_context_loss += tf.reduce_sum(labels*tf.log(labels+1e-12))
             # sample latent - token loss
             labels = tf.reshape(
                 sample_token_labels, [batch_size*num_candidates])
@@ -564,7 +564,7 @@ def train_masked(
             sample_token_loss = tf.nn.softmax_cross_entropy_with_logits_v2(
                 labels=tf.stop_gradient(labels),
                 logits=logits)
-            sample_token_loss -= tf.log(sample_token_labels_sum)
+            sample_token_loss += tf.reduce_sum(labels*tf.log(labels+1e-12))
         else:
             sample_context_loss, sample_token_loss = .0, .0
         # local context - token loss
