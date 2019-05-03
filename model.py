@@ -261,12 +261,10 @@ class Model(object):
         field_query_embedding, \
         field_key_embedding, \
         field_value_embedding, \
-        field_context_embedding, \
-        field_word_embedding, \
-        speller_context_embedding = get_embeddings(
+        field_prior_embedding = get_embeddings(
             len(self.char_vocab), model_config['char_embed_dim'],
             self.char_vocab.embedding_init, num_layers, layer_size,
-            word_match_size, speller_embed_size, speller_match_size, training=True)
+            global_match_size, speller_embed_size, training=True)
 
         word_embedder = Embedder(
             input_embedding, embed_size,
@@ -305,7 +303,6 @@ class Model(object):
         speller_trainer = SpellerTrainer(
             "Speller_Trainer",
             spellin_embedding,
-            speller_context_embedding,
             speller_cell,
             speller_matcher,
             training=True)
@@ -597,10 +594,8 @@ class Model(object):
             field_query_embeds = data_schema[field_id]['field_query_embedding']
             field_key_embeds = data_schema[field_id]['field_key_embedding']
             field_value_embeds = data_schema[field_id]['field_value_embedding']
-            field_context_embeds = tf.nn.embedding_lookup(
-                field_context_embedding, [field_id+1,])
-            field_word_embeds = tf.nn.embedding_lookup(
-                    field_word_embedding, [field_id+1,])
+            field_prior_embeds = tf.nn.embedding_lookup(
+                field_prior_embedding, [field_id+1,])
             if target_level == 0:
                 copy_word_ids = non_target_word_ids
                 copy_encodes = non_target_encodes
@@ -635,11 +630,10 @@ class Model(object):
             if target_level == 0:
                 regulation_loss = word_trainer(
                     limited_vocab,
-                    field_context_embeds, field_word_embeds,
                     feature['segmented_seqs'], feature['word_embeds'],
                     feature['masked_tfstruct'].encodes,
                     feature['word_masks'], feature['pick_masks'],
-                    global_encodes,
+                    global_encodes, field_prior_embeds,
                     candidate_ids, candidate_embeds, target_seqs,
                     copy_word_ids, copy_encodes, copy_masks,
                 )
@@ -683,10 +677,9 @@ class Model(object):
                     target_loss = sent_trainer(
                         initial_state,
                         limited_vocab,
-                        field_context_embeds, field_word_embeds,
                         feature['segmented_seqs'], feature['word_embeds'],
                         feature['word_masks'],
-                        global_encodes,
+                        global_encodes, field_prior_embeds,
                         candidate_ids, candidate_embeds, target_seqs,
                         copy_word_ids, copy_encodes, copy_masks,
                     )
@@ -707,11 +700,10 @@ class Model(object):
                         word_encoder, [tfstruct], [[1,1]], extra_tfstruct_list)[0]
                     target_loss = word_trainer(
                         limited_vocab,
-                        field_context_embeds, field_word_embeds,
                         feature['segmented_seqs'], feature['word_embeds'],
                         tfstruct.encodes,
                         feature['word_masks'], tf.ones([batch_size, 1], dtype=tf.bool),
-                        global_encodes,
+                        global_encodes, field_prior_embeds,
                         candidate_ids, candidate_embeds, target_seqs,
                         copy_word_ids, copy_encodes, copy_masks,
                     )
@@ -767,8 +759,7 @@ class Model(object):
                 field_query_embedding,
                 field_key_embedding,
                 field_value_embedding,
-                field_context_embedding,
-                field_token_embedding,
+                field_prior_embedding,
             ]
         else:
             var_list = None
@@ -852,12 +843,10 @@ class Model(object):
         field_query_embedding, \
         field_key_embedding, \
         field_value_embedding, \
-        field_context_embedding, \
-        field_word_embedding, \
-        speller_context_embedding = get_embeddings(
+        field_prior_embedding = get_embeddings(
             len(self.char_vocab), model_config['char_embed_dim'],
             self.char_vocab.embedding_init, num_layers, layer_size,
-            word_match_size, speller_embed_size, speller_match_size, training=False)
+            global_match_size, speller_embed_size, training=False)
 
         word_embedder = Embedder(
             input_embedding, embed_size,
@@ -1270,27 +1259,27 @@ class Model(object):
                     item2 = (candidate_encodes, copy_masks, 'encode')
                     word_select_logits += word_matcher(item1, item2)
 
+                field_prior_embeds = tf.nn.embedding_lookup(
+                    field_prior_embedding, [field_id+1,])
                 # sample-level logits
                 if target_level == 0:
                     sample_token_logits = global_matcher(
                         (tf.squeeze(masked_global_tfstruct.encodes, [1]), None, 'context'),
                         (local_candidate_embeds, None, 'embed'))
-                    sample_token_logits = tf.tile(
-                        tf.expand_dims(sample_token_logits, axis=1),
-                        [1,feature['seq_length'],1])
-                    sample_token_logits = tf.boolean_mask(
-                        sample_token_logits, feature['pick_masks'])
-                    word_select_logits += 0.1*sample_token_logits
                 else:
                     sample_token_logits = global_matcher(
                         (tf.squeeze(global_tfstruct.encodes, [1]), None, 'context'),
                         (local_candidate_embeds, None, 'embed'))
-                    sample_token_logits = tf.tile(
-                        tf.expand_dims(sample_token_logits, axis=1),
-                        [1,feature['seq_length'],1])
-                    sample_token_logits = tf.boolean_mask(
-                        sample_token_logits, feature['pick_masks'])
-                    word_select_logits += 0.1*sample_token_logits
+                token_prior_logits = global_matcher(
+                    (field_prior_embeds, None, 'latent'),
+                    (local_candidate_embeds, None, 'embed'))
+                extra_logits = sample_token_logits + token_prior_logits
+                extra_logits = tf.tile(
+                    tf.expand_dims(extra_logits, axis=1),
+                    [1,feature['seq_length'],1])
+                extra_logits = tf.boolean_mask(
+                    extra_logits, feature['pick_masks'])
+                word_select_logits += extra_logits
 
                 # word_select_loss
                 word_select_loss = tf.nn.sparse_softmax_cross_entropy_with_logits(
@@ -1401,12 +1390,10 @@ class Model(object):
         field_query_embedding, \
         field_key_embedding, \
         field_value_embedding, \
-        field_context_embedding, \
-        field_word_embedding, \
-        speller_context_embedding = get_embeddings(
+        field_prior_embedding = get_embeddings(
             len(self.char_vocab), model_config['char_embed_dim'],
             self.char_vocab.embedding_init, num_layers, layer_size,
-            word_match_size, speller_embed_size, speller_match_size, training=False)
+            global_match_size, speller_embed_size, training=False)
 
         word_embedder = Embedder(
             input_embedding, embed_size,
@@ -1438,9 +1425,11 @@ class Model(object):
         word_generator = WordGenerator(speller_cell, speller_matcher, spellin_embedding,
                                        self.char_vocab.token2id[self.char_vocab.sep])
         sent_generator = SentGenerator(
-            word_cell, word_matcher, global_matcher, word_embedder, word_generator)
+            word_cell, word_matcher, global_matcher,
+            word_embedder, word_generator)
         class_generator = ClassGenerator(
-            word_encoder, word_matcher, global_matcher, word_embedder, word_generator)
+            word_encoder, word_matcher, global_matcher,
+            word_embedder, word_generator)
 
         batch_size = tf.shape(features[0]['seqs'])[0]
         max_target_level = max([item['target_level'] for item in task_spec])
@@ -1647,6 +1636,8 @@ class Model(object):
                 copy_from = [] if copy_from is None else copy_from
 
                 if target_level == tlevel:
+                    field_prior_embeds = tf.nn.embedding_lookup(
+                        field_prior_embedding, [field_id+1,])
                     extra_tfstruct_list, extra_feature_id_list = [], []
                     copy_embeds, copy_ids, copy_masks, copy_encodes = [], [], [], []
                     for j in features:
@@ -1731,7 +1722,8 @@ class Model(object):
                                 nosep_masks = tf.not_equal(copy_ids, sep_id)
                                 copy_masks = tf.logical_and(copy_masks, nosep_masks)
                             seqs, scores = sent_generator.generate(
-                                initial_state, max_seq_length, global_encodes,
+                                initial_state, max_seq_length,
+                                global_encodes, field_prior_embeds,
                                 word_embedding, word_ids,
                                 copy_embeds=copy_embeds, copy_ids=copy_ids,
                                 copy_masks=copy_masks, copy_encodes=copy_encodes)
@@ -1760,7 +1752,8 @@ class Model(object):
                                         axis=-1)
                                     copy_masks = tf.logical_and(copy_masks, nosep_masks)
                                 seqs, scores = sent_generator.generate(
-                                    initial_state, max_seq_length, global_encodes,
+                                    initial_state, max_seq_length,
+                                    global_encodes, field_prior_embeds,
                                     sep_embeds, sep_ids,
                                     gen_word_len=max_token_length,
                                     copy_embeds=copy_embeds, copy_ids=copy_ids,
@@ -1809,7 +1802,8 @@ class Model(object):
                                         axis=-1)
                                     copy_masks = tf.logical_and(copy_masks, nosep_masks)
                                 seqs, scores = sent_generator.generate(
-                                    initial_state, max_seq_length, global_encodes,
+                                    initial_state, max_seq_length,
+                                    global_encodes, field_prior_embeds,
                                     candidate_embeds, candidate_ids,
                                     copy_embeds=copy_embeds, copy_ids=copy_ids,
                                     copy_masks=copy_masks, copy_encodes=copy_encodes)
@@ -1850,7 +1844,8 @@ class Model(object):
                             word_embedding = candidate_embeds
                             word_ids = tf.range(1, tf.shape(word_embedding)[0]+1, dtype=tf.int32)
                             classes, scores = class_generator.generate(
-                                tfstruct, extra_tfstruct, global_encodes,
+                                tfstruct, extra_tfstruct,
+                                global_encodes, field_prior_embeds,
                                 word_embedding=word_embedding, word_ids=word_ids,
                                 copy_embeds=copy_embeds, copy_ids=copy_ids,
                                 copy_masks=copy_masks, copy_encodes=copy_encodes)
@@ -1861,7 +1856,8 @@ class Model(object):
                         else:
                             if candidate_embeds is None:
                                 classes, scores = class_generator.generate(
-                                    tfstruct, extra_tfstruct, global_encodes,
+                                    tfstruct, extra_tfstruct,
+                                    global_encodes, field_prior_embeds,
                                     gen_word_len=max_token_len,
                                     copy_embeds=copy_embeds, copy_ids=copy_ids,
                                     copy_masks=copy_masks, copy_encodes=copy_encodes)
@@ -1878,7 +1874,8 @@ class Model(object):
                                 candidate_ids = tf.boolean_mask(candidate_ids, valid_masks)
                                 candidate_embeds = tf.boolean_mask(candidate_embeds, valid_masks)
                                 classes, scores = class_generator.generate(
-                                    tfstruct, extra_tfstruct, global_encodes,
+                                    tfstruct, extra_tfstruct,
+                                    global_encodes, field_prior_embeds,
                                     word_embedding=candidate_embeds, word_ids=candidate_ids,
                                     copy_embeds=copy_embeds, copy_ids=copy_ids,
                                     copy_masks=copy_masks, copy_encodes=copy_encodes)
