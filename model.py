@@ -1792,10 +1792,8 @@ class Model(object):
                                 candidate_ids = tf.concat(
                                     [sep_ids, candidate_ids], axis=0)
                                 if not copy_ids is None:
-                                    copy_ids = tf.pad(
-                                        copy_ids,
-                                        [[0,0],[0,0],[0,tf.shape(candidate_ids)[1]-tf.shape(copy_ids)[2]]])
-                                    copy_ids = copy_ids[:,:,:tf.shape(candidate_ids)[1]]
+                                    copy_ids, candidate_ids, sep_ids = model_utils_py3.pad_vectors(
+                                        [copy_ids, candidate_ids, sep_ids])
                                     nosep_masks = tf.reduce_any(
                                         tf.not_equal(
                                             copy_ids, tf.expand_dims(sep_ids, axis=0)),

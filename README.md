@@ -25,6 +25,7 @@
     ],
     'data_schema': [ ## list by field_id
         {
+            'name': str,
             'type': 'sequence'|'class',
             'limited_vocab': bool,
             'token_vocab': None|path,
@@ -50,6 +51,7 @@
 {
     'task_spec': [
         {
+            'name': str,
             'type': 'sequence'|'class',
             'copy_from': [field_ids],
             'target_level': int >= 0,
@@ -104,7 +106,7 @@
 3. Use transformer as encoder, each slot is defined by its field, position, and token.
 4. Field embeds have control on the attention part. When model is freezed, we only train the field embeds.
 5. Matcher takes the token embeds and token encodes of candidates to match, the later is for copy-mechanism.
-6. Cross entropy training is performed globally, instead of sample-wise.
+6. Cross entropy training is performed globally, instead of sample-wise. So the logits can be directly used in beam decoding.
 7. Dataset is independent of Task, one dataset can be mapped to multiple tasks.
 
 ## TODOs
