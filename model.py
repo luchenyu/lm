@@ -459,19 +459,20 @@ class Model(object):
             )
             valid_masks = tf.logical_and(
                 feature['word_masks'], tf.logical_not(feature['pick_masks']))
-            feature['masked_tfstruct'] = model_utils_py3.TransformerStruct(
-                field_query_embeds=feature['field_query_embeds'],
-                field_key_embeds=feature['field_key_embeds'],
-                field_value_embeds=feature['field_value_embeds'],
-                posit_embeds=feature['posit_embeds'],
-                token_embeds=feature['word_embeds'] * \
-                    tf.expand_dims(tf.cast(valid_masks, tf.float32), axis=2),
-                masks=valid_masks,
-                querys=None,
-                keys=None,
-                values=None,
-                encodes=None,
-            )
+#             feature['masked_tfstruct'] = model_utils_py3.TransformerStruct(
+#                 field_query_embeds=feature['field_query_embeds'],
+#                 field_key_embeds=feature['field_key_embeds'],
+#                 field_value_embeds=feature['field_value_embeds'],
+#                 posit_embeds=feature['posit_embeds'],
+#                 token_embeds=feature['word_embeds'] * \
+#                     tf.expand_dims(tf.cast(valid_masks, tf.float32), axis=2),
+#                 masks=valid_masks,
+#                 querys=None,
+#                 keys=None,
+#                 values=None,
+#                 encodes=None,
+#             )
+            feature['masked_tfstruct'] = feature['tfstruct']
 
         # add extra sample-level tfstruct
         global_tfstruct = model_utils_py3.TransformerStruct(
@@ -502,55 +503,48 @@ class Model(object):
             encodes=None,
         )
 
+        # loop for non targets
+        tfstruct_list, feature_id_list = [], []
+        for i in features:
+            if task_spec[data_index[i]['field_id']]['target_level'] == 0:
+                feature_id_list.append(i)
+                tfstruct_list.append(features[i]['masked_tfstruct'])
+
         # prepare attn_matrix
         attn_matrix = []
-        attn_matrix_macro = [0]
-        for i in features:
+        for i in feature_id_list:
             field_id_i = data_index[i]['field_id']
             item_id_i = data_index[i]['item_id']
             group_id_i = data_schema[field_id_i]['group_id']
-            target_level_i = task_spec[field_id_i]['target_level']
-            if target_level_i == 0:
-                attn_matrix_macro.append(1)
-            else:
-                attn_matrix_macro.append(0)
-            attn_matrix_local = [0]
-            for j in features:
+            attn_matrix_local = []
+            for j in feature_id_list:
                 field_id_j = data_index[j]['field_id']
                 item_id_j = data_index[j]['item_id']
                 group_id_j = data_schema[field_id_j]['group_id']
-                target_level_j = task_spec[field_id_j]['target_level']
                 if i == j:
                     attn_matrix_local.append(1)
                 elif group_id_i == group_id_j and item_id_i != item_id_j:
                     attn_matrix_local.append(0)
-                elif target_level_j == 0:
-                    attn_matrix_local.append(1)
-                elif target_level_i > target_level_j:
-                    attn_matrix_local.append(1)
                 else:
-                    attn_matrix_local.append(0)
+                    attn_matrix_local.append(1)
             attn_matrix.append(attn_matrix_local)
-        attn_matrix = [attn_matrix_macro] + attn_matrix
+        attn_matrix = [[0]+item for item in attn_matrix]
+        attn_matrix = [[0]+[1]*len(attn_matrix)] + attn_matrix
 
         # get encodes
-        tfstruct_list = [global_tfstruct] + [features[i]['masked_tfstruct'] for i in features]
-        tfstruct_list = encode_tfstructs(word_encoder, tfstruct_list, attn_matrix)
+        tfstruct_list = encode_tfstructs(
+            word_encoder, [global_tfstruct]+tfstruct_list, attn_matrix)
         global_tfstruct = tfstruct_list[0]
         global_encodes = tf.squeeze(global_tfstruct.encodes, [1])
-        for i in features:
-            features[i]['masked_tfstruct'] = tfstruct_list[i+1]
-
-        # all non-target level fields
         non_target_word_ids, non_target_encodes, non_target_masks = [], [], []
-        for i, feature in features.items():
-            field_id = data_index[i]['field_id']
-            target_level = task_spec[field_id]['target_level']
-            if target_level == 0:
-                non_target_word_ids.append(feature['segmented_seqs'])
-                non_target_encodes.append(feature['masked_tfstruct'].encodes)
-                non_target_masks.append(feature['masked_tfstruct'].masks)
-        if len(non_target_word_ids) > 0:
+        for i, feature_id in enumerate(feature_id_list):
+            features[feature_id]['masked_tfstruct'] = tfstruct_list[i+1]
+            non_target_word_ids.append(features[feature_id]['segmented_seqs'])
+            non_target_encodes.append(tfstruct_list[i+1].encodes)
+            non_target_masks.append(tfstruct_list[i+1].masks)
+
+        # all non-target features
+        if len(feature_id_list) > 0:
             non_target_word_ids = model_utils_py3.pad_vectors(
                 non_target_word_ids)
             non_target_word_ids = tf.concat(non_target_word_ids, axis=1)
@@ -626,20 +620,20 @@ class Model(object):
                 else:
                     copy_word_ids, copy_encodes, copy_masks = None, None, None
 
-            # regulation loss
-            if target_level == 0:
-                regulation_loss = word_trainer(
-                    limited_vocab,
-                    feature['segmented_seqs'], feature['word_embeds'],
-                    feature['masked_tfstruct'].encodes,
-                    feature['word_masks'], feature['pick_masks'],
-                    global_encodes, field_prior_embeds,
-                    candidate_ids, candidate_embeds, target_seqs,
-                    copy_word_ids, copy_encodes, copy_masks,
-                )
-                if regulation_losses.get(field_id) is None:
-                    regulation_losses[field_id] = []
-                regulation_losses[field_id].append(regulation_loss)
+#             # regulation loss
+#             if target_level == 0:
+#                 regulation_loss = word_trainer(
+#                     limited_vocab,
+#                     feature['segmented_seqs'], feature['word_embeds'],
+#                     feature['masked_tfstruct'].encodes,
+#                     feature['word_masks'], feature['pick_masks'],
+#                     global_encodes, field_prior_embeds,
+#                     candidate_ids, candidate_embeds, target_seqs,
+#                     copy_word_ids, copy_encodes, copy_masks,
+#                 )
+#                 if regulation_losses.get(field_id) is None:
+#                     regulation_losses[field_id] = []
+#                 regulation_losses[field_id].append(regulation_loss)
 
             # target loss
             if target_level > 0:
@@ -697,7 +691,8 @@ class Model(object):
                         encodes=None,
                     )
                     tfstruct = encode_tfstructs(
-                        word_encoder, [tfstruct], [[1,1]], extra_tfstruct_list)[0]
+                        word_encoder, [tfstruct],
+                        [[1,]+[1,]*len(extra_tfstruct_list)], extra_tfstruct_list)[0]
                     target_loss = word_trainer(
                         limited_vocab,
                         feature['segmented_seqs'], feature['word_embeds'],
@@ -731,7 +726,7 @@ class Model(object):
                     [tf.reduce_mean(
                         tf.stack(target_losses[key], axis=0)) for key in target_losses],
                     axis=0))
-            loss_train = loss_regulation + loss_target
+            loss_train = loss_target
             loss_show = loss_target
 
         # print total num of parameters

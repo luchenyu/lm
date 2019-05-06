@@ -358,7 +358,7 @@ def train_masked(
             copy_valid_match_scores = copy_valid_matrix * tf.expand_dims(
                 copy_valid_scores+1e-12, axis=0)
             # copy / no copy is not 1:1
-            copy_valid_pad_score = 0.1*tf.reduce_sum(
+            copy_valid_pad_score = 1e-6*tf.reduce_sum(
                 copy_valid_match_scores, axis=1, keepdims=True)
             copy_valid_pad_score = tf.maximum(copy_valid_pad_score, 1e-12)
             copy_valid_match_scores = tf.concat(
@@ -435,7 +435,7 @@ def train_masked(
             copy_match_matrix = tf.logical_and(
                 copy_match_matrix, tf.expand_dims(copy_masks, axis=1))
             copy_scores = tf.cast(copy_match_matrix, tf.float32)
-            copy_pad_score = 0.1*tf.reduce_sum(copy_scores, axis=2, keepdims=True)
+            copy_pad_score = 1e-6*tf.reduce_sum(copy_scores, axis=2, keepdims=True)
             copy_pad_score = tf.maximum(copy_pad_score, 1e-12)
             copy_scores = tf.concat([copy_scores, copy_pad_score], axis=2)
             copy_encodes_padded = tf.pad(copy_encodes, [[0,0],[0,1],[0,0]])
@@ -455,6 +455,10 @@ def train_masked(
             context_token_logits += matcher(
                 (pick_encodes, None, 'context'),
                 (candidate_encodes, candidate_masks, 'encode'))
+
+        context_token_labels *= tf.exp(context_token_logits)
+        context_token_labels /= tf.reduce_sum(
+            context_token_labels, axis=1, keepdims=True)
 
     context_token_labels_sum = tf.reduce_sum(context_token_labels)
     context_token_labels *= 1.0/context_token_labels_sum
@@ -664,7 +668,7 @@ class WordTrainer(object):
                 field_prior_embeds,
                 candidate_ids, candidate_embeds, target_seqs,
                 copy_word_ids, copy_encodes, copy_masks,
-                extra_loss_fn=speller_loss_fn,
+                extra_loss_fn=None,
             )
 
         return loss
@@ -894,7 +898,7 @@ class SentGenerator(object):
         self.word_embedder = word_embedder
         self.word_generator = word_generator
         self.decoder = lambda *args: model_utils_py3.beam_dec(
-            *args, beam_size=4, num_candidates=1, cutoff_rate=0.1, gamma=8.0)
+            *args, beam_size=16, num_candidates=1, cutoff_rate=0.1, gamma=8.0)
 
     def generate(
         self,
