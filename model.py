@@ -536,10 +536,12 @@ class Model(object):
             word_encoder, [global_tfstruct]+tfstruct_list, attn_matrix)
         global_tfstruct = tfstruct_list[0]
         global_encodes = tf.squeeze(global_tfstruct.encodes, [1])
-        non_target_word_ids, non_target_encodes, non_target_masks = [], [], []
+        non_target_word_ids, non_target_embeds, non_target_encodes, non_target_masks \
+        = [], [], [], []
         for i, feature_id in enumerate(feature_id_list):
             features[feature_id]['masked_tfstruct'] = tfstruct_list[i+1]
             non_target_word_ids.append(features[feature_id]['segmented_seqs'])
+            non_target_embeds.append(tfstruct_list[i+1].token_embeds)
             non_target_encodes.append(tfstruct_list[i+1].encodes)
             non_target_masks.append(tfstruct_list[i+1].masks)
 
@@ -548,6 +550,7 @@ class Model(object):
             non_target_word_ids = model_utils_py3.pad_vectors(
                 non_target_word_ids)
             non_target_word_ids = tf.concat(non_target_word_ids, axis=1)
+            non_target_embeds = tf.concat(non_target_embeds, axis=1)
             non_target_encodes = tf.concat(non_target_encodes, axis=1)
             non_target_masks = tf.concat(non_target_masks, axis=1)
             sep_ids = tf.constant(
@@ -561,7 +564,8 @@ class Model(object):
                 axis=2)
             non_target_masks = tf.logical_and(non_target_masks, nosep_masks)
         else:
-            non_target_word_ids, non_target_encodes, non_target_masks = None, None, None
+            non_target_word_ids, non_target_embeds, non_target_encodes, non_target_masks \
+            = None, None, None, None
 
         # get the loss of each feature
         regulation_losses = {}
@@ -592,19 +596,23 @@ class Model(object):
                 field_prior_embedding, [field_id+1,])
             if target_level == 0:
                 copy_word_ids = non_target_word_ids
+                copy_embeds = non_target_embeds
                 copy_encodes = non_target_encodes
                 copy_masks = non_target_masks
             else:
-                copy_word_ids, copy_encodes, copy_masks = [],[],[]
+                copy_word_ids, copy_embeds, copy_encodes, copy_masks \
+                = [], [], [], []
                 for j in features:
                     if data_index[j]['field_id'] in copy_from and i != j:
                         copy_word_ids.append(features[j]['segmented_seqs'])
+                        copy_embeds.append(features[j]['masked_tfstruct'].token_embeds)
                         copy_encodes.append(features[j]['masked_tfstruct'].encodes)
                         copy_masks.append(features[j]['masked_tfstruct'].masks)
                 if len(copy_word_ids) > 0:
                     copy_word_ids = model_utils_py3.pad_vectors(
                         copy_word_ids)
                     copy_word_ids = tf.concat(copy_word_ids, axis=1)
+                    copy_embeds = tf.concat(copy_embeds, axis=1)
                     copy_encodes = tf.concat(copy_encodes, axis=1)
                     copy_masks = tf.concat(copy_masks, axis=1)
                     sep_ids = tf.constant(
@@ -618,7 +626,8 @@ class Model(object):
                         axis=2)
                     copy_masks = tf.logical_and(copy_masks, nosep_masks)
                 else:
-                    copy_word_ids, copy_encodes, copy_masks = None, None, None
+                    copy_word_ids, copy_embeds, copy_encodes, copy_masks \
+                    = None, None, None, None
 
             # regulation loss
             if target_level == 0:
@@ -629,7 +638,7 @@ class Model(object):
                     feature['word_masks'], feature['pick_masks'],
                     global_encodes, field_prior_embeds,
                     candidate_ids, candidate_embeds, target_seqs,
-                    copy_word_ids, copy_encodes, copy_masks,
+                    copy_word_ids, copy_embeds, copy_encodes, copy_masks,
                 )
                 if regulation_losses.get(field_id) is None:
                     regulation_losses[field_id] = []
@@ -675,7 +684,7 @@ class Model(object):
                         feature['word_masks'],
                         global_encodes, field_prior_embeds,
                         candidate_ids, candidate_embeds, target_seqs,
-                        copy_word_ids, copy_encodes, copy_masks,
+                        copy_word_ids, copy_embeds, copy_encodes, copy_masks,
                     )
                 elif feature_type == 'class':
                     tfstruct = model_utils_py3.TransformerStruct(
@@ -700,7 +709,7 @@ class Model(object):
                         feature['word_masks'], tf.ones([batch_size, 1], dtype=tf.bool),
                         global_encodes, field_prior_embeds,
                         candidate_ids, candidate_embeds, target_seqs,
-                        copy_word_ids, copy_encodes, copy_masks,
+                        copy_word_ids, copy_embeds, copy_encodes, copy_masks,
                     )
                 else:
                     target_loss = None
