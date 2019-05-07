@@ -260,6 +260,8 @@ def train_masked(
     if not target_seqs is None:
         pick_target_seqs = tf.boolean_mask(
             target_seqs, pick_masks)
+        valid_target_seqs = tf.boolean_mask(
+            target_seqs, valid_masks)
     num_picks = tf.shape(pick_encodes)[0]
 
     if limited_vocab:
@@ -277,7 +279,7 @@ def train_masked(
                 (field_prior_embeds, None, 'latent'),
                 (candidate_embeds, None, 'embed'))
             token_prior_labels = tf.one_hot(
-                pick_target_seqs, num_candidates)
+                valid_target_seqs, num_candidates)
             token_prior_labels = tf.reduce_sum(
                 token_prior_labels, axis=0, keepdims=True)
             token_prior_labels_sum = tf.reduce_sum(
@@ -295,7 +297,7 @@ def train_masked(
                 on_value=True, off_value=False)
             sample_token_onehots = tf.logical_and(
                 sample_token_onehots,
-                tf.expand_dims(pick_masks, axis=2))
+                tf.expand_dims(valid_masks, axis=2))
             sample_token_onehots = tf.cast(
                 sample_token_onehots, tf.float32)
             sample_token_labels = tf.reduce_sum(
@@ -416,15 +418,15 @@ def train_masked(
             token_prior_logits = global_matcher(
                 (field_prior_embeds, None, 'latent'),
                 (unique_valid_token_embeds, None, 'embed'))
-#             token_prior_logits = tf.pad(token_prior_logits, [[0,0],[0,1]])
+            token_prior_logits = tf.pad(token_prior_logits, [[0,0],[0,1]])
             token_prior_labels = model_utils_py3.match_vector(
-                pick_token_ids, unique_valid_token_ids)
+                valid_token_ids, unique_valid_token_ids)
             token_prior_labels = tf.cast(token_prior_labels, tf.float32)
             token_prior_labels = tf.reduce_sum(
                 token_prior_labels, axis=0, keepdims=True)
             token_prior_labels_sum = tf.reduce_sum(token_prior_labels)
             token_prior_labels *= 1.0 / token_prior_labels_sum
-#             token_prior_labels = tf.pad(token_prior_labels, [[0,0],[0,1]])
+            token_prior_labels = tf.pad(token_prior_labels, [[0,0],[0,1]])
 
             # sample latent - token distribution
             sample_token_logits = global_matcher(
@@ -433,7 +435,7 @@ def train_masked(
             sample_token_labels = tf.cast(
                 tf.logical_and(
                     match_matrix,
-                    tf.expand_dims(pick_masks, axis=2)),
+                    tf.expand_dims(valid_masks, axis=2)),
                 tf.float32)
             sample_token_labels /= tf.maximum(
                 tf.reduce_sum(sample_token_labels, axis=2, keepdims=True), 1e-12)
