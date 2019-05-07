@@ -407,8 +407,6 @@ def train_masked(
             match_matrix, pick_masks)
         context_token_labels = tf.cast(
             context_token_labels, tf.float32)
-        context_token_labels /= tf.reduce_sum(
-            context_token_labels, axis=1, keepdims=True)
         context_token_logits = matcher(
             (pick_encodes, None, 'context'),
             (valid_token_embeds, None, 'embed'))
@@ -650,7 +648,7 @@ class WordTrainer(object):
                 tf.reduce_any(pick_masks),
                 get_speller_loss,
                 lambda: 0.0)
-            return 1.0*speller_loss
+            return 0.1*speller_loss
         self.speller_loss_fn = speller_loss_fn
 
     def __call__(
@@ -675,7 +673,7 @@ class WordTrainer(object):
                 field_prior_embeds,
                 candidate_ids, candidate_embeds, target_seqs,
                 copy_word_ids, copy_embeds, copy_encodes, copy_masks,
-                extra_loss_fn=None,
+                extra_loss_fn=self.speller_loss_fn,
             )
 
         return loss
