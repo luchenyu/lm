@@ -459,20 +459,20 @@ class Model(object):
             )
             valid_masks = tf.logical_and(
                 feature['word_masks'], tf.logical_not(feature['pick_masks']))
-#             feature['masked_tfstruct'] = model_utils_py3.TransformerStruct(
-#                 field_query_embeds=feature['field_query_embeds'],
-#                 field_key_embeds=feature['field_key_embeds'],
-#                 field_value_embeds=feature['field_value_embeds'],
-#                 posit_embeds=feature['posit_embeds'],
-#                 token_embeds=feature['word_embeds'] * \
-#                     tf.expand_dims(tf.cast(valid_masks, tf.float32), axis=2),
-#                 masks=valid_masks,
-#                 querys=None,
-#                 keys=None,
-#                 values=None,
-#                 encodes=None,
-#             )
-            feature['masked_tfstruct'] = feature['tfstruct']
+            feature['masked_tfstruct'] = model_utils_py3.TransformerStruct(
+                field_query_embeds=feature['field_query_embeds'],
+                field_key_embeds=feature['field_key_embeds'],
+                field_value_embeds=feature['field_value_embeds'],
+                posit_embeds=feature['posit_embeds'],
+                token_embeds=feature['word_embeds'] * \
+                    tf.expand_dims(tf.cast(valid_masks, tf.float32), axis=2),
+                masks=valid_masks,
+                querys=None,
+                keys=None,
+                values=None,
+                encodes=None,
+            )
+#             feature['masked_tfstruct'] = feature['tfstruct']
 
         # add extra sample-level tfstruct
         global_tfstruct = model_utils_py3.TransformerStruct(
@@ -620,20 +620,20 @@ class Model(object):
                 else:
                     copy_word_ids, copy_encodes, copy_masks = None, None, None
 
-#             # regulation loss
-#             if target_level == 0:
-#                 regulation_loss = word_trainer(
-#                     limited_vocab,
-#                     feature['segmented_seqs'], feature['word_embeds'],
-#                     feature['masked_tfstruct'].encodes,
-#                     feature['word_masks'], feature['pick_masks'],
-#                     global_encodes, field_prior_embeds,
-#                     candidate_ids, candidate_embeds, target_seqs,
-#                     copy_word_ids, copy_encodes, copy_masks,
-#                 )
-#                 if regulation_losses.get(field_id) is None:
-#                     regulation_losses[field_id] = []
-#                 regulation_losses[field_id].append(regulation_loss)
+            # regulation loss
+            if target_level == 0:
+                regulation_loss = word_trainer(
+                    limited_vocab,
+                    feature['segmented_seqs'], feature['word_embeds'],
+                    feature['masked_tfstruct'].encodes,
+                    feature['word_masks'], feature['pick_masks'],
+                    global_encodes, field_prior_embeds,
+                    candidate_ids, candidate_embeds, target_seqs,
+                    copy_word_ids, copy_encodes, copy_masks,
+                )
+                if regulation_losses.get(field_id) is None:
+                    regulation_losses[field_id] = []
+                regulation_losses[field_id].append(regulation_loss)
 
             # target loss
             if target_level > 0:
@@ -726,7 +726,7 @@ class Model(object):
                     [tf.reduce_mean(
                         tf.stack(target_losses[key], axis=0)) for key in target_losses],
                     axis=0))
-            loss_train = loss_target
+            loss_train = loss_regulation+loss_target
             loss_show = loss_target
 
         # print total num of parameters
@@ -1893,6 +1893,30 @@ class Model(object):
                                 feature['segmented_seqs'])
                         feature['word_embeds'] = word_embeds
                         feature['word_masks'] = word_masks
+
+                        # field_encodes and posit_embeds
+                        seq_length = tf.shape(word_embeds)[1]
+                        field_query_embeds = tf.tile(
+                            tf.nn.embedding_lookup(field_query_embedding, [[field_id+1,]]),# field embeds 0 is reserved
+                            [batch_size, seq_length, 1])
+                        feature['field_query_embeds'] = tuple(tf.split(field_query_embeds, num_layers, axis=2))
+                        field_key_embeds = tf.tile(
+                            tf.nn.embedding_lookup(field_key_embedding, [[field_id+1,]]),# field embeds 0 is reserved
+                            [batch_size, seq_length, 1])
+                        feature['field_key_embeds'] = tuple(tf.split(field_key_embeds, num_layers, axis=2))
+                        field_value_embeds = tf.tile(
+                            tf.nn.embedding_lookup(field_value_embedding, [[field_id+1,]]),# field embeds 0 is reserved
+                            [batch_size, seq_length, 1])
+                        feature['field_value_embeds'] = tuple(tf.split(field_value_embeds, num_layers, axis=2))
+                        if feature_type == 'sequence':
+                            posit_ids = tf.tile(
+                                tf.expand_dims(tf.range(seq_length), 0), [batch_size, 1])
+                            posit_embeds = model_utils_py3.embed_position(
+                                posit_ids,
+                                posit_size)
+                        else:
+                            posit_embeds = tf.zeros([batch_size, seq_length, posit_size])
+                        feature['posit_embeds'] = posit_embeds
 
                         # encode
                         tfstruct = model_utils_py3.TransformerStruct(
