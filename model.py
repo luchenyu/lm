@@ -335,16 +335,27 @@ class Model(object):
             if not token_vocab is None:
                 token_ids = data_schema[field_id].get('token_ids')
                 candidate_ids = data_schema[field_id].get('candidate_ids')
+                candidate_freqs = data_schema[field_id].get('candidate_freqs')
                 if token_ids is None:
+                    keys = list(token_vocab.keys())
+                    indices = tf.constant(
+                        [keys.index(i) for i in range(len(token_vocab))], tf.int32)
                     token_ids = tf.constant(token_vocab.decompose_table, tf.int32)
+                    token_ids = tf.gather(token_ids, indices)
                     if not max_token_length is None:
                         token_ids = tf.cond(
                             tf.less(tf.shape(token_ids)[1], max_token_length),
                             lambda: token_ids,
                             lambda: token_ids[:,:max_token_length])
+                    token_freqs = tf.constant(
+                        [token_vocab.dfs[i] if not token_vocab.dfs.get(i) is None 
+                        else 0 for i in token_vocab.keys()], tf.float32)
+                    token_freqs = tf.gather(token_freqs, indices)
                     candidate_ids = token_ids[1:]
+                    candidate_freqs = token_freqs[1:]
                     data_schema[field_id]['token_ids'] = token_ids
                     data_schema[field_id]['candidate_ids'] = candidate_ids
+                    data_schema[field_id]['candidate_freqs'] = candidate_freqs
             if limited_vocab:
                 segmented_seqs = tf.gather(token_ids, seqs)
             else:
@@ -895,16 +906,27 @@ class Model(object):
             if not token_vocab is None:
                 token_ids = data_schema[field_id].get('token_ids')
                 candidate_ids = data_schema[field_id].get('candidate_ids')
+                candidate_freqs = data_schema[field_id].get('candidate_freqs')
                 if token_ids is None:
+                    keys = list(token_vocab.keys())
+                    indices = tf.constant(
+                        [keys.index(i) for i in range(len(token_vocab))], tf.int32)
                     token_ids = tf.constant(token_vocab.decompose_table, tf.int32)
+                    token_ids = tf.gather(token_ids, indices)
                     if not max_token_length is None:
                         token_ids = tf.cond(
                             tf.less(tf.shape(token_ids)[1], max_token_length),
                             lambda: token_ids,
                             lambda: token_ids[:,:max_token_length])
+                    token_freqs = tf.constant(
+                        [token_vocab.dfs[i] if not token_vocab.dfs.get(i) is None 
+                        else 0 for i in token_vocab.keys()], tf.float32)
+                    token_freqs = tf.gather(token_freqs, indices)
                     candidate_ids = token_ids[1:]
+                    candidate_freqs = token_freqs[1:]
                     data_schema[field_id]['token_ids'] = token_ids
                     data_schema[field_id]['candidate_ids'] = candidate_ids
+                    data_schema[field_id]['candidate_freqs'] = candidate_freqs
             if limited_vocab:
                 segmented_seqs = tf.gather(token_ids, seqs)
             else:
@@ -1454,16 +1476,27 @@ class Model(object):
             if not token_vocab is None:
                 token_ids = data_schema[field_id].get('token_ids')
                 candidate_ids = data_schema[field_id].get('candidate_ids')
+                candidate_freqs = data_schema[field_id].get('candidate_freqs')
                 if token_ids is None:
+                    keys = list(token_vocab.keys())
+                    indices = tf.constant(
+                        [keys.index(i) for i in range(len(token_vocab))], tf.int32)
                     token_ids = tf.constant(token_vocab.decompose_table, tf.int32)
+                    token_ids = tf.gather(token_ids, indices)
                     if not max_token_length is None:
                         token_ids = tf.cond(
                             tf.less(tf.shape(token_ids)[1], max_token_length),
                             lambda: token_ids,
                             lambda: token_ids[:,:max_token_length])
+                    token_freqs = tf.constant(
+                        [token_vocab.dfs[i] if not token_vocab.dfs.get(i) is None 
+                        else 0 for i in token_vocab.keys()], tf.float32)
+                    token_freqs = tf.gather(token_freqs, indices)
                     candidate_ids = token_ids[1:]
+                    candidate_freqs = token_freqs[1:]
                     data_schema[field_id]['token_ids'] = token_ids
                     data_schema[field_id]['candidate_ids'] = candidate_ids
+                    data_schema[field_id]['candidate_freqs'] = candidate_freqs
             if limited_vocab:
                 segmented_seqs = tf.gather(token_ids, seqs)
             else:
@@ -1632,6 +1665,7 @@ class Model(object):
                 token_ids = data_schema[field_id].get('token_ids')
                 token_embeds = data_schema[field_id].get('token_embeds')
                 candidate_ids = data_schema[field_id].get('candidate_ids')
+                candidate_freqs = data_schema[field_id].get('candidate_freqs')
                 candidate_embeds = data_schema[field_id].get('candidate_embeds')
                 max_token_length = data_schema[field_id].get('max_token_length')
                 max_seq_length = data_schema[field_id].get('max_seq_length')
@@ -1759,7 +1793,7 @@ class Model(object):
                                     initial_state, max_seq_length,
                                     global_encodes, field_prior_embeds,
                                     sep_embeds, sep_ids,
-                                    gen_word_len=max_token_length,
+                                    # gen_word_len=max_token_length,
                                     copy_embeds=copy_embeds, copy_ids=copy_ids,
                                     copy_masks=copy_masks, copy_encodes=copy_encodes)
                             else:
@@ -1845,10 +1879,14 @@ class Model(object):
                         if limited_vocab:
                             word_embedding = candidate_embeds
                             word_ids = tf.range(1, tf.shape(word_embedding)[0]+1, dtype=tf.int32)
+                            if not candidate_freqs is None:
+                                word_priors = candidate_freqs / tf.reduce_sum(candidate_freqs)
+                            else:
+                                word_priors = None
                             classes, scores = class_generator.generate(
                                 tfstruct, extra_tfstruct,
                                 global_encodes, field_prior_embeds,
-                                word_embedding=word_embedding, word_ids=word_ids,
+                                word_embedding=word_embedding, word_ids=word_ids, word_priors=word_priors,
                                 copy_embeds=copy_embeds, copy_ids=copy_ids,
                                 copy_masks=copy_masks, copy_encodes=copy_encodes)
                             feature['seqs'] = classes[:,0]
@@ -1860,7 +1898,7 @@ class Model(object):
                                 classes, scores = class_generator.generate(
                                     tfstruct, extra_tfstruct,
                                     global_encodes, field_prior_embeds,
-                                    gen_word_len=max_token_len,
+                                    # gen_word_len=max_token_len,
                                     copy_embeds=copy_embeds, copy_ids=copy_ids,
                                     copy_masks=copy_masks, copy_encodes=copy_encodes)
                             else:

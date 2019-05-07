@@ -905,7 +905,7 @@ class SentGenerator(object):
         self.word_embedder = word_embedder
         self.word_generator = word_generator
         self.decoder = lambda *args: model_utils_py3.beam_dec(
-            *args, beam_size=16, num_candidates=1, cutoff_rate=0.1, gamma=5.0)
+            *args, beam_size=4, num_candidates=1, cutoff_rate=0.1, gamma=1.0)
 
     def generate(
         self,
@@ -1162,7 +1162,7 @@ class ClassGenerator(object):
                  tfstruct,
                  extra_tfstruct,
                  global_encodes, field_prior_embeds,
-                 word_embedding=None, word_ids=None,
+                 word_embedding=None, word_ids=None, word_priors=None,
                  gen_word_len=None,
                  copy_embeds=None, copy_ids=None, copy_masks=None, copy_encodes=None):
         """
@@ -1170,6 +1170,7 @@ class ClassGenerator(object):
             max_word_len: int
             word_embedding: num_words x embed_dim
             word_ids: num_words
+            word_priors: num_words
         return:
             classes: batch_size x num_candidates [x word_len]
             scores: batch_size x num_candidates
@@ -1193,9 +1194,13 @@ class ClassGenerator(object):
             sample_token_logits = self.global_matcher(
                 (global_latents, None, 'latent'),
                 (word_embedding, None, 'embed'))
-            token_prior_logits = self.global_matcher(
-                (field_prior_embeds, None, 'latent'),
-                (word_embedding, None, 'embed'))
+            if word_priors is None:
+                token_prior_logits = self.global_matcher(
+                    (field_prior_embeds, None, 'latent'),
+                    (word_embedding, None, 'embed'))
+            else:
+                token_prior_logits = tf.expand_dims(
+                    tf.nn.log_softmax(word_priors), axis=0)
             extra_logits = sample_token_logits + token_prior_logits
             def candidates_fn(encodes):
                 context_token_logits = self.word_matcher(
