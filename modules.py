@@ -453,17 +453,28 @@ def train_masked(
             or copy_encodes is None
             or copy_masks is None):
 
+            copy_sample_ids = tf.tile(
+                tf.expand_dims(tf.range(batch_size), axis=1), [1,concat_seq_length])
             copy_encodes = tf.pad(copy_encodes, [[0,0],[seq_length,0],[0,0]])
             copy_masks = tf.pad(copy_masks, [[0,0],[seq_length,0]])
             _, candidate_encodes = tf.dynamic_partition(
                 copy_encodes, valid_masks_int, 2)
             candidate_masks = tf.boolean_mask(
                 copy_masks, valid_masks)
-            context_token_logits += matcher(
+            candidate_sample_ids = tf.boolean_mask(
+                copy_sample_ids, valid_masks)
+            candidate_sample_ids = tf.tile(
+                tf.expand_dims(candidate_sample_ids, axis=0),
+                [num_picks, 1])
+            sample_masks = tf.equal(
+                candidate_sample_ids, tf.expand_dims(pick_sample_ids, axis=1))
+            copy_logits = matcher(
                 (pick_encodes, None, 'context'),
                 (candidate_encodes, candidate_masks, 'encode'))
+            copy_logits *= tf.cast(sample_masks, tf.float32)
+            context_token_logits += copy_logits
 
-        context_token_labels *= tf.nn.softmax(context_token_logits*context_token_labels)
+        context_token_labels *= tf.exp(context_token_logits*context_token_labels)
         context_token_labels /= tf.reduce_sum(
             context_token_labels, axis=1, keepdims=True)
 
@@ -675,7 +686,7 @@ class WordTrainer(object):
                 field_prior_embeds,
                 candidate_ids, candidate_embeds, target_seqs,
                 copy_word_ids, copy_embeds, copy_encodes, copy_masks,
-                extra_loss_fn=self.speller_loss_fn,
+                extra_loss_fn=None,
             )
 
         return loss
@@ -905,7 +916,7 @@ class SentGenerator(object):
         self.word_embedder = word_embedder
         self.word_generator = word_generator
         self.decoder = lambda *args: model_utils_py3.beam_dec(
-            *args, beam_size=4, num_candidates=1, cutoff_rate=0.1, gamma=1.0)
+            *args, beam_size=16, num_candidates=1, cutoff_rate=0.1, gamma=1.0)
 
     def generate(
         self,
