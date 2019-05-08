@@ -1650,6 +1650,7 @@ class Model(object):
                 candidate_embeds = data_schema[field_id].get('candidate_embeds')
                 max_token_length = data_schema[field_id].get('max_token_length')
                 max_seq_length = data_schema[field_id].get('max_seq_length')
+                min_seq_length = data_schema[field_id].get('min_seq_length')
                 target_level = task_spec[field_id]['target_level']
                 copy_from = task_spec[field_id].get('copy_from')
                 copy_from = [] if copy_from is None else copy_from
@@ -1745,7 +1746,8 @@ class Model(object):
                                 global_encodes, field_prior_embeds,
                                 word_embedding, word_ids,
                                 copy_embeds=copy_embeds, copy_ids=copy_ids,
-                                copy_masks=copy_masks, copy_encodes=copy_encodes)
+                                copy_masks=copy_masks, copy_encodes=copy_encodes,
+                                min_length=min_seq_length)
                             feature['seqs'] = seqs[:,0]
                             feature['segs'] = tf.zeros([batch_size, 0])
                             feature['segmented_seqs'] = tf.gather(
@@ -1776,7 +1778,8 @@ class Model(object):
                                     sep_embeds, sep_ids,
                                     # gen_word_len=max_token_length,
                                     copy_embeds=copy_embeds, copy_ids=copy_ids,
-                                    copy_masks=copy_masks, copy_encodes=copy_encodes)
+                                    copy_masks=copy_masks, copy_encodes=copy_encodes,
+                                    min_length=min_seq_length)
                             else:
                                 unk_ids = tf.constant(
                                     [[self.char_vocab.token2id[self.char_vocab.unk]]],
@@ -1823,7 +1826,8 @@ class Model(object):
                                     global_encodes, field_prior_embeds,
                                     candidate_embeds, candidate_ids,
                                     copy_embeds=copy_embeds, copy_ids=copy_ids,
-                                    copy_masks=copy_masks, copy_encodes=copy_encodes)
+                                    copy_masks=copy_masks, copy_encodes=copy_encodes,
+                                    min_length=min_seq_length)
                             feature['segmented_seqs'] = seqs[:,0]
                             feature['seqs'], feature['segs'] = model_utils_py3.stitch_chars(
                                 feature['segmented_seqs'])

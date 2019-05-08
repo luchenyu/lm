@@ -785,7 +785,8 @@ def generate_seq(
     length,
     candidates_fn_list,
     start_embedding,
-    start_id):
+    start_id,
+    min_length=1):
     """
     args:
         decoder: a recursive decoder
@@ -811,7 +812,8 @@ def generate_seq(
     candidates_callback = lambda encodes: concat_candidates(encodes, candidates_fn_list)
 
     seqs, scores = decoder(
-        length, initial_state, state_si_fn, cell, candidates_callback, start_embedding, start_id)
+        length, initial_state, state_si_fn, cell, candidates_callback, start_embedding, start_id,
+        min_length=min_length)
 
     return seqs, scores
 
@@ -839,8 +841,8 @@ class WordGenerator(object):
              tf.range(sep_id+1, tf.shape(spellin_embedding)[0], dtype=tf.int32)],
             axis=0)
         speller_matcher.cache_embeds(self.nosep_embedding)
-        self.decoder = lambda *args: model_utils_py3.stochastic_beam_dec(
-            *args, beam_size=8, num_candidates=8, cutoff_rate=0.1, gamma=1.0)
+        self.decoder = lambda *args, **kwargs: model_utils_py3.stochastic_beam_dec(
+            *args, **kwargs, beam_size=8, num_candidates=8, cutoff_rate=0.1)
 
     def generate(
         self,
@@ -877,7 +879,8 @@ class WordGenerator(object):
         seqs, scores = generate_seq(
             self.decoder, self.speller_cell,
             initial_state, state_si_fn, length, [candidates_fn],
-            start_embedding, tf.zeros([], dtype=tf.int32))
+            start_embedding, tf.zeros([], dtype=tf.int32),
+            min_length=1)
 
         return seqs[:,:,1:], scores
 
@@ -904,7 +907,7 @@ class SentGenerator(object):
         self.word_embedder = word_embedder
         self.word_generator = word_generator
         self.decoder = lambda *args: model_utils_py3.beam_dec(
-            *args, beam_size=16, num_candidates=1, cutoff_rate=0.1, gamma=1.0)
+            *args, beam_size=16, num_candidates=1, cutoff_rate=0.1)
 
     def generate(
         self,
@@ -913,7 +916,8 @@ class SentGenerator(object):
         global_encodes, field_prior_embeds,
         word_embedding, word_ids,
         gen_word_len=None,
-        copy_embeds=None, copy_ids=None, copy_masks=None, copy_encodes=None):
+        copy_embeds=None, copy_ids=None, copy_masks=None, copy_encodes=None,
+        min_length=1):
         """
         args:
             initial_state: TransformerState
@@ -1123,11 +1127,14 @@ class SentGenerator(object):
                 return copy_embeds_tiled, copy_ids_tiled, copy_masks_tiled, logits
             candidates_fn_list.append(candidates_fn)
 
+        if min_length is None:
+            min_length = 1
         seqs, scores = generate_seq(
             self.decoder, self.word_cell,
             initial_state, state_si_fn, length-1,
             candidates_fn_list,
-            start_embedding, start_id)
+            start_embedding, start_id,
+            min_length=min_length)
         if len(seqs.get_shape()) == 3:
             seqs = tf.pad(seqs, [[0,0],[0,0],[0,length-tf.shape(seqs)[2]]])
         elif len(seqs.get_shape()) == 4:

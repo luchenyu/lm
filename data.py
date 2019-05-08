@@ -192,7 +192,7 @@ class Dataset(object):
                     if mapped_schema[field_id]['limited_vocab']:
                         token_vocab = mapped_schema[field_id]['token_vocab']
                         seqs = data_utils_py3.tokens_to_seqs(words, token_vocab)
-                        segs = []
+                        segs = [1.0,]*(len(seqs)+1)
                     else:
                         seqs, segs = data_utils_py3.tokens_to_seqs_segs(
                             words, self.char_vocab)
@@ -232,7 +232,9 @@ class Dataset(object):
                 field_id = mapped_index[i]['field_id']
                 min_seq_length = mapped_schema[field_id].get('min_seq_length')
                 if not min_seq_length is None:
-                    valids.append(tf.greater(tf.shape(feature['seqs'])[0], min_seq_length))
+                    valids.append(tf.logical_or(
+                        tf.equal(tf.shape(feature['seqs'])[0], 0),
+                        tf.greater(tf.reduce_sum(feature['segs']), min_seq_length+2)))
             if len(valids) > 0:
                 return tf.reduce_all(tf.stack(valids))
             else:
