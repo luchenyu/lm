@@ -268,10 +268,10 @@ def train_masked(
         num_candidates = tf.shape(candidate_ids)[0]
 
         # local context - token distribution
-        context_token_labels = tf.one_hot(pick_target_seqs, num_candidates)
         context_token_logits = matcher(
             (pick_encodes, None, 'context'),
             (candidate_embeds, None, 'embed'))
+        context_token_labels = tf.one_hot(pick_target_seqs, num_candidates)
 
         if not global_matcher is None:
             # token prior distribution
@@ -395,23 +395,19 @@ def train_masked(
         num_candidates = num_valids
 
         concat_seq_length = tf.shape(token_ids)[1]
-        concat_ids_length = tf.shape(token_ids)[2]
-        match_matrix = model_utils_py3.match_vector(
-            tf.reshape(token_ids, [batch_size*concat_seq_length, concat_ids_length]),
-            valid_token_ids)
-        match_matrix = tf.reshape(
-            match_matrix, [batch_size, concat_seq_length, num_valids])
-        match_matrix = tf.logical_and(
-            match_matrix, tf.expand_dims(valid_masks, axis=2))
+        concat_sample_ids = tf.tile(
+            tf.expand_dims(tf.range(batch_size), axis=1), [1,concat_seq_length])
+        valid_sample_ids = tf.boolean_mask(
+            concat_sample_ids, valid_masks)
 
         # local context - token distribution
-        context_token_labels = tf.boolean_mask(
-            match_matrix, pick_masks)
-        context_token_labels = tf.cast(
-            context_token_labels, tf.float32)
         context_token_logits = matcher(
             (pick_encodes, None, 'context'),
             (valid_token_embeds, None, 'embed'))
+        context_token_labels = model_utils_py3.match_vector(
+            pick_token_ids, valid_token_ids)
+        context_token_labels = tf.cast(
+            context_token_labels, tf.float32)
 
         if not global_matcher is None:
             # token prior distribution
@@ -432,14 +428,10 @@ def train_masked(
             sample_token_logits = global_matcher(
                 (global_encodes, None, 'context'),
                 (valid_token_embeds, None, 'embed'))
-            sample_token_labels = tf.cast(
-                tf.logical_and(
-                    match_matrix,
-                    tf.expand_dims(valid_masks, axis=2)),
-                tf.float32)
-            sample_token_labels /= tf.maximum(
-                tf.reduce_sum(sample_token_labels, axis=2, keepdims=True), 1e-12)
-            sample_token_labels = tf.reduce_sum(sample_token_labels, axis=1)
+            sample_token_labels = tf.equal(
+                tf.tile(tf.expand_dims(valid_sample_ids, axis=0), [batch_size, 1]),
+                tf.expand_dims(tf.range(batch_size), axis=1))
+            sample_token_labels = tf.cast(sample_token_labels, tf.float32)
             sample_token_labels_sum = tf.reduce_sum(sample_token_labels)
             sample_token_labels *= 1.0 / sample_token_labels_sum
 
@@ -453,18 +445,14 @@ def train_masked(
             or copy_encodes is None
             or copy_masks is None):
 
-            copy_sample_ids = tf.tile(
-                tf.expand_dims(tf.range(batch_size), axis=1), [1,concat_seq_length])
             copy_encodes = tf.pad(copy_encodes, [[0,0],[seq_length,0],[0,0]])
             copy_masks = tf.pad(copy_masks, [[0,0],[seq_length,0]])
             _, candidate_encodes = tf.dynamic_partition(
                 copy_encodes, valid_masks_int, 2)
             candidate_masks = tf.boolean_mask(
                 copy_masks, valid_masks)
-            candidate_sample_ids = tf.boolean_mask(
-                copy_sample_ids, valid_masks)
             candidate_sample_ids = tf.tile(
-                tf.expand_dims(candidate_sample_ids, axis=0),
+                tf.expand_dims(valid_sample_ids, axis=0),
                 [num_picks, 1])
             sample_masks = tf.equal(
                 candidate_sample_ids, tf.expand_dims(pick_sample_ids, axis=1))
