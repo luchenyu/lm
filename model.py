@@ -1215,7 +1215,7 @@ class Model(object):
                         copy_valid_masks = [],[],[]
                     for j in features:
                         field_id_j = data_index[j]['field_id']
-                        if field_id_j in copy_from and i != j:
+                        if field_id_j in copy_from:
                             copy_segmented_seqs.append(features[j]['segmented_seqs'])
                             copy_encodes.append(features[j]['tfstruct'].encodes)
                             copy_valid_masks.append(features[j]['tfstruct'].masks)
