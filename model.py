@@ -562,36 +562,6 @@ class Model(object):
         for i, feature_id in enumerate(feature_id_list):
             features[feature_id]['masked_tfstruct'] = tfstruct_list[i+1]
 
-        # all non-target features
-        non_target_word_ids, non_target_embeds, non_target_encodes, non_target_masks \
-        = [], [], [], []
-        for i in features:
-            if task_spec[data_index[i]['field_id']]['target_level'] == 0:
-                non_target_word_ids.append(features[i]['segmented_seqs'])
-                non_target_embeds.append(features[i]['word_embeds'])
-                non_target_encodes.append(features[i]['masked_tfstruct'].encodes)
-                non_target_masks.append(features[i]['masked_tfstruct'].masks)
-        if len(non_target_word_ids) > 0:
-            non_target_word_ids = model_utils_py3.pad_vectors(
-                non_target_word_ids)
-            non_target_word_ids = tf.concat(non_target_word_ids, axis=1)
-            non_target_embeds = tf.concat(non_target_embeds, axis=1)
-            non_target_encodes = tf.concat(non_target_encodes, axis=1)
-            non_target_masks = tf.concat(non_target_masks, axis=1)
-            sep_ids = tf.constant(
-                [[[self.char_vocab.token2id[self.char_vocab.sep]]]],
-                dtype=tf.int32)
-            sep_ids = tf.pad(
-                sep_ids,
-                [[0,0],[0,0],[0,tf.shape(non_target_word_ids)[2]-1]])
-            nosep_masks = tf.reduce_any(
-                tf.not_equal(non_target_word_ids, sep_ids),
-                axis=2)
-            non_target_masks = tf.logical_and(non_target_masks, nosep_masks)
-        else:
-            non_target_word_ids, non_target_embeds, non_target_encodes, non_target_masks \
-            = None, None, None, None
-
         # get the loss of each feature
         regulation_losses = {}
         target_losses = {}
@@ -619,40 +589,37 @@ class Model(object):
             field_value_embeds = data_schema[field_id]['field_value_embedding']
             field_prior_embeds = tf.nn.embedding_lookup(
                 field_prior_embedding, [field_id+1,])
-            if target_level == 0:
-                copy_word_ids = non_target_word_ids
-                copy_embeds = non_target_embeds
-                copy_encodes = non_target_encodes
-                copy_masks = non_target_masks
+
+            copy_word_ids, copy_embeds, copy_encodes, copy_masks \
+            = [], [], [], []
+            for j in features:
+                if target_level > 0 and i == j:
+                    continue
+                elif data_index[j]['field_id'] in copy_from:
+                    copy_word_ids.append(features[j]['segmented_seqs'])
+                    copy_embeds.append(features[j]['masked_tfstruct'].token_embeds)
+                    copy_encodes.append(features[j]['masked_tfstruct'].encodes)
+                    copy_masks.append(features[j]['masked_tfstruct'].masks)
+            if len(copy_word_ids) > 0:
+                copy_word_ids = model_utils_py3.pad_vectors(
+                    copy_word_ids)
+                copy_word_ids = tf.concat(copy_word_ids, axis=1)
+                copy_embeds = tf.concat(copy_embeds, axis=1)
+                copy_encodes = tf.concat(copy_encodes, axis=1)
+                copy_masks = tf.concat(copy_masks, axis=1)
+                sep_ids = tf.constant(
+                    [[[self.char_vocab.token2id[self.char_vocab.sep]]]],
+                    dtype=tf.int32)
+                sep_ids = tf.pad(
+                    sep_ids,
+                    [[0,0],[0,0],[0,tf.shape(copy_word_ids)[2]-1]])
+                nosep_masks = tf.reduce_any(
+                    tf.not_equal(copy_word_ids, sep_ids),
+                    axis=2)
+                copy_masks = tf.logical_and(copy_masks, nosep_masks)
             else:
                 copy_word_ids, copy_embeds, copy_encodes, copy_masks \
-                = [], [], [], []
-                for j in features:
-                    if data_index[j]['field_id'] in copy_from and i != j:
-                        copy_word_ids.append(features[j]['segmented_seqs'])
-                        copy_embeds.append(features[j]['masked_tfstruct'].token_embeds)
-                        copy_encodes.append(features[j]['masked_tfstruct'].encodes)
-                        copy_masks.append(features[j]['masked_tfstruct'].masks)
-                if len(copy_word_ids) > 0:
-                    copy_word_ids = model_utils_py3.pad_vectors(
-                        copy_word_ids)
-                    copy_word_ids = tf.concat(copy_word_ids, axis=1)
-                    copy_embeds = tf.concat(copy_embeds, axis=1)
-                    copy_encodes = tf.concat(copy_encodes, axis=1)
-                    copy_masks = tf.concat(copy_masks, axis=1)
-                    sep_ids = tf.constant(
-                        [[[self.char_vocab.token2id[self.char_vocab.sep]]]],
-                        dtype=tf.int32)
-                    sep_ids = tf.pad(
-                        sep_ids,
-                        [[0,0],[0,0],[0,tf.shape(copy_word_ids)[2]-1]])
-                    nosep_masks = tf.reduce_any(
-                        tf.not_equal(copy_word_ids, sep_ids),
-                        axis=2)
-                    copy_masks = tf.logical_and(copy_masks, nosep_masks)
-                else:
-                    copy_word_ids, copy_embeds, copy_encodes, copy_masks \
-                    = None, None, None, None
+                = None, None, None, None
 
             # regulation loss
             if target_level == 0:
