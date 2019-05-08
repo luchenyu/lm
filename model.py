@@ -235,6 +235,7 @@ class Model(object):
 
         task_config = self.task_config
         task_spec = task_config['task_spec']
+        max_target_level = max([item['target_level'] for item in task_spec])
 
         model_config = self.model_config
         layer_size = model_config['layer_size']
@@ -514,50 +515,63 @@ class Model(object):
             encodes=None,
         )
 
-        # loop for non targets
+        # loop for target levels < max_target_level
         tfstruct_list, feature_id_list = [], []
         for i in features:
-            if task_spec[data_index[i]['field_id']]['target_level'] == 0:
+            target_level = task_spec[data_index[i]['field_id']]['target_level']
+            if target_level < max_target_level or target_level == 0:
                 feature_id_list.append(i)
                 tfstruct_list.append(features[i]['masked_tfstruct'])
 
         # prepare attn_matrix
         attn_matrix = []
+        attn_matrix_macro = [0]
         for i in feature_id_list:
             field_id_i = data_index[i]['field_id']
             item_id_i = data_index[i]['item_id']
             group_id_i = data_schema[field_id_i]['group_id']
-            attn_matrix_local = []
+            target_level_i = task_spec[field_id_i]['target_level']
+            if target_level_i == 0:
+                attn_matrix_macro.append(1)
+            else:
+                attn_matrix_macro.append(0)
+            attn_matrix_local = [0]
             for j in feature_id_list:
                 field_id_j = data_index[j]['field_id']
                 item_id_j = data_index[j]['item_id']
                 group_id_j = data_schema[field_id_j]['group_id']
+                target_level_j = task_spec[field_id_j]['target_level']
                 if i == j:
                     attn_matrix_local.append(1)
                 elif group_id_i == group_id_j and item_id_i != item_id_j:
                     attn_matrix_local.append(0)
-                else:
+                elif target_level_j == 0:
                     attn_matrix_local.append(1)
+                elif target_level_i > target_level_j:
+                    attn_matrix_local.append(1)
+                else:
+                    attn_matrix_local.append(0)
             attn_matrix.append(attn_matrix_local)
-        attn_matrix = [[0]+item for item in attn_matrix]
-        attn_matrix = [[0]+[1]*len(attn_matrix)] + attn_matrix
+        attn_matrix = [attn_matrix_macro] + attn_matrix
 
         # get encodes
         tfstruct_list = encode_tfstructs(
             word_encoder, [global_tfstruct]+tfstruct_list, attn_matrix)
         global_tfstruct = tfstruct_list[0]
         global_encodes = tf.squeeze(global_tfstruct.encodes, [1])
-        non_target_word_ids, non_target_embeds, non_target_encodes, non_target_masks \
-        = [], [], [], []
         for i, feature_id in enumerate(feature_id_list):
             features[feature_id]['masked_tfstruct'] = tfstruct_list[i+1]
-            non_target_word_ids.append(features[feature_id]['segmented_seqs'])
-            non_target_embeds.append(tfstruct_list[i+1].token_embeds)
-            non_target_encodes.append(tfstruct_list[i+1].encodes)
-            non_target_masks.append(tfstruct_list[i+1].masks)
 
         # all non-target features
-        if len(feature_id_list) > 0:
+        non_target_word_ids, non_target_embeds, non_target_encodes, non_target_masks \
+        = [], [], [], []
+        for i in features:
+            if task_spec[data_index[i]['field_id']]['target_level'] == 0:
+                non_target_word_ids.append(features[i]['segmented_seqs'])
+                non_target_embeds.append(features[i]['word_embeds'])
+                non_target_encodes.append(features[i]['masked_tfstruct'].encodes)
+                non_target_masks.append(features[i]['masked_tfstruct'].masks)
+        if len(non_target_word_ids) > 0:
             non_target_word_ids = model_utils_py3.pad_vectors(
                 non_target_word_ids)
             non_target_word_ids = tf.concat(non_target_word_ids, axis=1)
