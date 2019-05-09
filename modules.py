@@ -1206,7 +1206,7 @@ class ClassGenerator(object):
                     (word_embedding, None, 'embed'))
             else:
                 token_prior_logits = tf.expand_dims(
-                    tf.nn.log_softmax(word_priors), axis=0)
+                    tf.log(word_priors), axis=0)
             extra_logits = sample_token_logits + token_prior_logits
             def candidates_fn(encodes):
                 context_token_logits = self.word_matcher(
