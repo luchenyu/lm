@@ -1217,7 +1217,10 @@ class Model(object):
                         field_id_j = data_index[j]['field_id']
                         if field_id_j in copy_from:
                             copy_segmented_seqs.append(features[j]['segmented_seqs'])
-                            copy_encodes.append(features[j]['tfstruct'].encodes)
+                            if target_level == 0:
+                                copy_encodes.append(features[j]['masked_tfstruct'].encodes)
+                            else:
+                                copy_encodes.append(features[j]['tfstruct'].encodes)
                             copy_valid_masks.append(features[j]['tfstruct'].masks)
                     # first we get the matrix indicates whether x copy to y
                     all_segmented_seqs = model_utils_py3.pad_vectors(
