@@ -215,38 +215,58 @@ def train_masked(
     limited_vocab,
     token_ids, token_embeds, encodes,
     valid_masks, pick_masks,
+    attn_token_ids=None, attn_token_embeds=None,
+    attn_encodes=None, attn_valid_masks=None,
     global_matcher=None, global_encodes=None,
     field_prior_embeds=None,
-    candidate_ids=None, candidate_embeds=None, target_seqs=None,
-    copy_token_ids=None, copy_embeds=None, copy_encodes=None, copy_masks=None,
+    candidate_token_ids=None, candidate_token_embeds=None,
+    candidate_valid_masks=None,
+    target_seqs=None,
     extra_loss_fn=None):
     """
     get the loss
     args:
         matcher: matcher object
         limited_vocab: bool
-        field_context_embeds: 1 x match_size
-        field_token_embeds: 1 x match_size
         token_ids: batch_size x seq_length x word_len
         token_embeds: batch_size x seq_length x embed_dim
         encodes: batch_size x seq_length x encode_dim
         valid_masks: batch_size x seq_length
         pick_masks: batch_size x seq_length
-        global_encodes: batch_size x macro_size
+        attn_token_ids: batch_size x attn_seq_length x word_len
+        attn_token_embeds: batch_size x attn_seq_length x embed_dim
+        attn_encodes: batch_size x attn_seq_length x encode_dim
+        attn_valid_masks: batch_size x attn_seq_length
         global_matcher: matcher object for global matching
-        candidate_ids: num_candidates x word_len
-        candidate_embeds: num_candidates x embed_dim
+        global_encodes: batch_size x macro_size
+        field_prior_embeds: 1 x match_size
+        candidate_token_ids: num_candidates x word_len or
+            batch_size x candidate_seq_length x word_len
+        candidate_token_embeds: num_candidates x embed_dim or
+            batch_size x candidate_seq_length x embed_dim
+        candidate_valid_masks: batch_size x candidate_seq_length
         target_seqs: batch_size x seq_length
-        copy_token_ids: batch_size x copy_seq_length x word_len
-        copy_encodes: batch_size x copy_seq_length x encode_dim
-        copy_masks: batch_size x copy_seq_length
         extra_loss_fn: fn for extra_loss
     """
 
+    do_attn = not (
+        attn_token_ids is None or
+        attn_token_embeds is None or
+        attn_encodes is None or
+        attn_valid_masks is None)
+    do_extra_logit = not (
+        global_matcher is None or
+        global_encodes is None or
+        field_prior_embeds is None)
+
     batch_size = tf.shape(token_ids)[0]
     seq_length = tf.shape(token_ids)[1]
-    pick_masks_int = tf.cast(pick_masks, tf.int32)
+    embed_dim = token_embeds.get_shape()[-1].value
 
+    token_ids, attn_token_ids, candidate_token_ids = model_utils_py3.pad_vectors(
+        [token_ids, attn_token_ids, candidate_token_ids])
+
+    pick_masks_int = tf.cast(pick_masks, tf.int32)
     sample_ids = tf.tile(
         tf.expand_dims(tf.range(batch_size), axis=1), [1,seq_length])
     pick_token_ids = tf.boolean_mask(
@@ -264,20 +284,57 @@ def train_masked(
             target_seqs, valid_masks)
     num_picks = tf.shape(pick_encodes)[0]
 
+    # attn
+    if do_attn:
+        attn_seq_length = tf.shape(attn_token_ids)[1]
+        attn_valid_masks_int = tf.cast(attn_valid_masks, tf.int32)
+        attn_sample_ids = tf.tile(
+            tf.expand_dims(tf.range(batch_size), axis=1), [1,attn_seq_length])
+        valid_attn_sample_ids = tf.boolean_mask(
+            attn_sample_ids, attn_valid_masks)
+        _, valid_attn_token_embeds = tf.dynamic_partition(
+            attn_token_embeds, attn_valid_masks_int, 2)
+        _, valid_attn_encodes = tf.dynamic_partition(
+            attn_encodes, attn_valid_masks_int, 2)
+        valid_attn_sample_ids = tf.tile(
+            tf.expand_dims(valid_attn_sample_ids, axis=0),
+            [num_picks, 1])
+        sample_attn_masks = tf.equal(
+            valid_attn_sample_ids, tf.expand_dims(pick_sample_ids, axis=1))
+        sample_attn_masks = tf.cast(sample_attn_masks, tf.float32)
+
+        attn_logits = matcher(
+            (pick_encodes, None, 'context'),
+            (valid_attn_encodes, None, 'encode'))
+        attn_logits *= sample_attn_masks
+        attn_weights = tf.exp(tf.math.abs(attn_logits))*sample_attn_masks
+        attn_weights /= tf.maximum(
+            tf.reduce_sum(attn_weights, axis=1, keepdims=True), 1e-12)
+        attn_logits *= attn_weights
+
     if limited_vocab:
-        num_candidates = tf.shape(candidate_ids)[0]
+
+        num_candidates = tf.shape(candidate_token_ids)[0]
 
         # local context - token distribution
         context_token_logits = matcher(
             (pick_encodes, None, 'context'),
-            (candidate_embeds, None, 'embed'))
+            (candidate_token_embeds, None, 'embed'))
+        # copy part
+        if do_attn:
+            candidate_copy_logits = matcher(
+                (valid_attn_token_embeds, None, 'latent'),
+                (candidate_token_embeds, None, 'latent'))
+            copy_logits = tf.matmul(attn_logits, candidate_copy_logits)
+            context_token_logits += copy_logits
+
         context_token_labels = tf.one_hot(pick_target_seqs, num_candidates)
 
-        if not global_matcher is None:
+        if do_extra_logit:
             # token prior distribution
             token_prior_logits = global_matcher(
                 (field_prior_embeds, None, 'latent'),
-                (candidate_embeds, None, 'embed'))
+                (candidate_token_embeds, None, 'embed'))
             token_prior_labels = tf.one_hot(
                 valid_target_seqs, num_candidates)
             token_prior_labels = tf.reduce_sum(
@@ -291,7 +348,7 @@ def train_masked(
             # sample latent - token distribution
             sample_token_logits = global_matcher(
                 (global_encodes, None, 'context'),
-                (candidate_embeds, None, 'embed'))
+                (candidate_token_embeds, None, 'embed'))
             sample_token_onehots = tf.one_hot(
                 target_seqs, num_candidates,
                 on_value=True, off_value=False)
@@ -310,116 +367,67 @@ def train_masked(
                 tf.matmul(pick_sample_onehots, sample_token_logits))
             sample_token_logits += tf.stop_gradient(token_prior_logits)
 
-        # copy part
-        if not (
-            copy_token_ids is None
-            or copy_embeds is None
-            or copy_encodes is None
-            or copy_masks is None):
-
-            token_ids, candidate_ids, copy_token_ids = model_utils_py3.pad_vectors(
-                [token_ids, candidate_ids, copy_token_ids])
-            # first we get the matrix indicates whether x copy to y
-            copy_score_matrix = model_utils_py3.match_vector(
-                copy_token_ids, token_ids)
-            copy_score_matrix = tf.logical_and(
-                copy_score_matrix, tf.expand_dims(pick_masks, axis=1))
-            copy_score_matrix = tf.logical_and(
-                copy_score_matrix, tf.expand_dims(copy_masks, axis=2))
-            # calculate the normalized prob each slot being copied
-            copy_scores = tf.cast(copy_score_matrix, tf.float32)
-            copy_scores /= (tf.reduce_sum(copy_scores, axis=1, keepdims=True)+1e-12)
-            copy_scores = tf.reduce_sum(copy_scores, axis=2)
-            # gather all valid slots which can be selected from
-            copy_valid_token_ids = tf.boolean_mask(
-                copy_token_ids, copy_masks)
-            copy_valid_scores = tf.boolean_mask(
-                copy_scores, copy_masks)
-            _, copy_valid_encodes = tf.dynamic_partition(
-                copy_encodes, tf.cast(copy_masks, tf.int32), 2)
-            copy_valid_encodes = tf.pad(copy_valid_encodes, [[0,1],[0,0]])
-            # for each candidate token, we gather the probs of all corresponding slots
-            copy_valid_matrix = model_utils_py3.match_vector(
-                candidate_ids, copy_valid_token_ids)
-            copy_valid_matrix = tf.cast(copy_valid_matrix, tf.float32)
-            copy_valid_match_scores = copy_valid_matrix * tf.expand_dims(
-                copy_valid_scores+1e-12, axis=0)
-            # copy / no copy is not 1:1
-            copy_valid_pad_score = 1e-6*tf.reduce_sum(
-                copy_valid_match_scores, axis=1, keepdims=True)
-            copy_valid_pad_score = tf.maximum(copy_valid_pad_score, 1e-12)
-            copy_valid_match_scores = tf.concat(
-                [copy_valid_match_scores, copy_valid_pad_score], axis=1)
-            random_ids = tf.squeeze(
-                tf.random.categorical(
-                    tf.log(copy_valid_match_scores), 1, dtype=tf.int32),
-                axis=[-1])
-            num_copys = tf.shape(copy_valid_encodes)[0]
-            candidate_masks = tf.not_equal(random_ids, num_copys-1)
-            random_onehots = tf.one_hot(random_ids, num_copys)
-            candidate_encodes = tf.matmul(random_onehots, copy_valid_encodes)
-            context_token_logits += matcher(
-                (pick_encodes, None, 'context'),
-                (candidate_encodes, candidate_masks, 'encode'))
+        predictions = tf.argmax(
+            context_token_logits, axis=1, output_type=tf.int32)
+        groundtruths = pick_target_seqs
 
     else:
-        if not (
-            copy_token_ids is None
-            or copy_embeds is None
-            or copy_encodes is None
-            or copy_masks is None):
 
-            token_ids, copy_token_ids, pick_token_ids = model_utils_py3.pad_vectors(
-                [token_ids, copy_token_ids, pick_token_ids])
-            token_ids = tf.concat([token_ids, copy_token_ids], axis=1)
-            valid_masks = tf.concat([valid_masks, copy_masks], axis=1)
-            token_embeds = tf.concat([token_embeds, copy_embeds], axis=1)
-            pick_masks = tf.concat([pick_masks, tf.zeros_like(copy_masks)], axis=1)
+        candidate_seq_length = tf.shape(candidate_token_ids)[1]
+        candidate_valid_masks_int = tf.cast(candidate_valid_masks, tf.int32)
+        candidate_sample_ids = tf.tile(
+            tf.expand_dims(tf.range(batch_size), axis=1), [1,candidate_seq_length])
+        _, valid_candidate_token_embeds = tf.dynamic_partition(
+            candidate_token_embeds, candidate_valid_masks_int, 2)
+        valid_candidate_token_ids = tf.boolean_mask(
+            candidate_token_ids, candidate_valid_masks)
+        valid_candidate_sample_ids = tf.boolean_mask(
+            candidate_sample_ids, candidate_valid_masks)
+        num_valids = tf.shape(valid_candidate_token_ids)[0]
 
-        valid_masks_int = tf.cast(valid_masks, tf.int32)
-        valid_token_ids = tf.boolean_mask(
-            token_ids, valid_masks)
-        _, valid_token_embeds = tf.dynamic_partition(
-            token_embeds, valid_masks_int, 2)
-        num_valids = tf.shape(valid_token_ids)[0]
+        unique_valid_candidate_masks = model_utils_py3.mask_unique_vector(
+            candidate_token_ids, candidate_valid_masks)
+        unique_valid_candidate_masks_int = tf.cast(unique_valid_candidate_masks, tf.int32)
+        unique_valid_candidate_token_ids = tf.boolean_mask(
+            candidate_token_ids, unique_valid_candidate_masks)
+        _, unique_valid_candidate_token_embeds = tf.dynamic_partition(
+            candidate_token_embeds, unique_valid_candidate_masks_int, 2)
+        num_unique_valids = tf.shape(unique_valid_candidate_token_ids)[0]
 
-        unique_valid_masks = model_utils_py3.mask_unique_vector(
-            token_ids, valid_masks)
-        unique_valid_masks_int = tf.cast(unique_valid_masks, tf.int32)
-        unique_valid_token_ids = tf.boolean_mask(
-            token_ids, unique_valid_masks)
-        _, unique_valid_token_embeds = tf.dynamic_partition(
-            token_embeds, unique_valid_masks_int, 2)
-        num_unique_valids = tf.shape(unique_valid_token_ids)[0]
+        pick_match_matrix = model_utils_py3.match_vector(
+            pick_token_ids, unique_valid_candidate_token_ids)
+        pick_match_matrix = tf.cast(pick_match_matrix, tf.float32)
+        valid_match_matrix = model_utils_py3.match_vector(
+            valid_candidate_token_ids, unique_valid_candidate_token_ids)
+        valid_match_matrix = tf.cast(valid_match_matrix, tf.float32)
 
         num_candidates = num_valids
-
-        concat_seq_length = tf.shape(token_ids)[1]
-        concat_sample_ids = tf.tile(
-            tf.expand_dims(tf.range(batch_size), axis=1), [1,concat_seq_length])
-        valid_sample_ids = tf.boolean_mask(
-            concat_sample_ids, valid_masks)
 
         # local context - token distribution
         context_token_logits = matcher(
             (pick_encodes, None, 'context'),
-            (valid_token_embeds, None, 'embed'))
-        context_token_labels = model_utils_py3.match_vector(
-            pick_token_ids, valid_token_ids)
-        context_token_labels = tf.cast(
-            context_token_labels, tf.float32)
+            (valid_candidate_token_embeds, None, 'embed'))
+        # copy part
+        if do_attn:
+            candidate_copy_logits = matcher(
+                (valid_attn_token_embeds, None, 'latent'),
+                (valid_candidate_token_embeds, None, 'latent'))
+            copy_logits = tf.matmul(attn_logits, candidate_copy_logits)
+            context_token_logits += copy_logits
 
-        if not global_matcher is None:
+        context_token_labels = tf.matmul(
+            pick_match_matrix, valid_match_matrix, transpose_b=True)
+        context_token_labels /= tf.reduce_sum(
+            context_token_labels, axis=1, keepdims=True)
+
+        if do_extra_logit:
             # token prior distribution
             token_prior_logits = global_matcher(
                 (field_prior_embeds, None, 'latent'),
-                (unique_valid_token_embeds, None, 'embed'))
+                (unique_valid_candidate_token_embeds, None, 'embed'))
             token_prior_logits = tf.pad(token_prior_logits, [[0,0],[0,1]])
-            token_prior_labels = model_utils_py3.match_vector(
-                valid_token_ids, unique_valid_token_ids)
-            token_prior_labels = tf.cast(token_prior_labels, tf.float32)
             token_prior_labels = tf.reduce_sum(
-                token_prior_labels, axis=0, keepdims=True)
+                valid_match_matrix, axis=0, keepdims=True)
             token_prior_labels_sum = tf.reduce_sum(token_prior_labels)
             token_prior_labels *= 1.0 / token_prior_labels_sum
             token_prior_labels = tf.pad(token_prior_labels, [[0,0],[0,1]])
@@ -427,9 +435,9 @@ def train_masked(
             # sample latent - token distribution
             sample_token_logits = global_matcher(
                 (global_encodes, None, 'context'),
-                (valid_token_embeds, None, 'embed'))
+                (valid_candidate_token_embeds, None, 'embed'))
             sample_token_labels = tf.equal(
-                tf.tile(tf.expand_dims(valid_sample_ids, axis=0), [batch_size, 1]),
+                tf.tile(tf.expand_dims(valid_candidate_sample_ids, axis=0), [batch_size, 1]),
                 tf.expand_dims(tf.range(batch_size), axis=1))
             sample_token_labels = tf.cast(sample_token_labels, tf.float32)
             sample_token_labels_sum = tf.reduce_sum(sample_token_labels)
@@ -438,33 +446,16 @@ def train_masked(
             context_token_logits += (
                 tf.matmul(pick_sample_onehots, sample_token_logits))
 
-        # copy part
-        if not (
-            copy_token_ids is None
-            or copy_embeds is None
-            or copy_encodes is None
-            or copy_masks is None):
-
-            copy_encodes = tf.pad(copy_encodes, [[0,0],[seq_length,0],[0,0]])
-            copy_masks = tf.pad(copy_masks, [[0,0],[seq_length,0]])
-            _, candidate_encodes = tf.dynamic_partition(
-                copy_encodes, valid_masks_int, 2)
-            candidate_masks = tf.boolean_mask(
-                copy_masks, valid_masks)
-            candidate_sample_ids = tf.tile(
-                tf.expand_dims(valid_sample_ids, axis=0),
-                [num_picks, 1])
-            sample_masks = tf.equal(
-                candidate_sample_ids, tf.expand_dims(pick_sample_ids, axis=1))
-            copy_logits = matcher(
-                (pick_encodes, None, 'context'),
-                (candidate_encodes, candidate_masks, 'encode'))
-            copy_logits *= tf.cast(sample_masks, tf.float32)
-            context_token_logits += copy_logits
-
-        context_token_labels *= tf.exp(context_token_logits*context_token_labels)
-        context_token_labels /= tf.reduce_sum(
-            context_token_labels, axis=1, keepdims=True)
+        valid_idx = tf.argmax(
+            valid_match_matrix, axis=1, output_type=tf.int32)
+        pick_idx = tf.argmax(
+            pick_match_matrix, axis=1, output_type=tf.int32)
+        with_prior_logits = context_token_logits + tf.matmul(
+            token_prior_logits[:,:-1], valid_match_matrix, transpose_b=True)
+        predictions = tf.argmax(
+            with_prior_logits, axis=1, output_type=tf.int32)
+        predictions = tf.gather(valid_idx, predictions)
+        groundtruths = pick_idx
 
     context_token_labels_sum = tf.reduce_sum(context_token_labels)
     context_token_labels *= 1.0/context_token_labels_sum
@@ -513,17 +504,24 @@ def train_masked(
     if not extra_loss_fn is None:
         loss += extra_loss_fn(**locals())
 
-    return loss
+    accuracy = tf.metrics.accuracy(
+        labels=groundtruths,
+        predictions=predictions)
+
+    return loss, accuracy
 
 def train_seq(
     initial_state,
     cell, matcher,
     limited_vocab,
     token_ids, token_embeds, valid_masks,
+    attn_token_ids=None, attn_token_embeds=None,
+    attn_encodes=None, attn_valid_masks=None,
     global_matcher=None, global_encodes=None,
     field_prior_embeds=None,
-    candidate_ids=None, candidate_embeds=None, target_seqs=None,
-    copy_token_ids=None, copy_embeds=None, copy_encodes=None, copy_masks=None,
+    candidate_token_ids=None, candidate_token_embeds=None,
+    candidate_valid_masks=None,
+    target_seqs=None,
     extra_loss_fn=None):
     """
     args:
@@ -541,19 +539,22 @@ def train_seq(
     pick_masks = valid_masks
     if not target_seqs is None:
         target_seqs = target_seqs[:,1:]
-    loss = train_masked(
+    loss, accuracy = train_masked(
         matcher,
         limited_vocab,
         token_ids, token_embeds, encodes,
         valid_masks, pick_masks,
+        attn_token_ids, attn_token_embeds,
+        attn_encodes, attn_valid_masks,
         global_matcher, global_encodes,
         field_prior_embeds,
-        candidate_ids, candidate_embeds, target_seqs,
-        copy_token_ids, copy_embeds, copy_encodes, copy_masks,
-        extra_loss_fn,
+        candidate_token_ids, candidate_token_embeds,
+        candidate_valid_masks,
+        target_seqs,
+        extra_loss_fn=extra_loss_fn,
     )
 
-    return loss
+    return loss, accuracy
 
 class SpellerTrainer(object):
     """get the loss of a speller"""
@@ -609,17 +610,17 @@ class SpellerTrainer(object):
                 token_onehots, self.spellin_embedding)
             token_embeds = tf.reshape(
                 token_embeds, [batch_size, seq_length, vocab_dim])
-            loss = train_seq(
+            loss, accuracy = train_seq(
                 initial_state,
                 self.speller_cell, self.speller_matcher,
                 True,
                 token_ids, token_embeds, valid_masks,
-                candidate_ids=tf.expand_dims(tf.range(vocab_size), axis=1),
-                candidate_embeds=self.spellin_embedding,
+                candidate_token_ids=tf.expand_dims(tf.range(vocab_size), axis=1),
+                candidate_token_embeds=self.spellin_embedding,
                 target_seqs=target_seqs,
             )
 
-        return loss
+        return loss, accuracy
 
 class WordTrainer(object):
     """own a speller_trainer and """
@@ -641,7 +642,7 @@ class WordTrainer(object):
             pick_encodes = kwargs['pick_encodes']
             pick_target_seqs = kwargs['pick_token_ids']
             def get_speller_loss():
-                speller_loss = self.speller_trainer(
+                speller_loss, _ = self.speller_trainer(
                     pick_encodes,
                     pick_target_seqs)
                 return speller_loss
@@ -649,35 +650,41 @@ class WordTrainer(object):
                 tf.reduce_any(pick_masks),
                 get_speller_loss,
                 lambda: 0.0)
-            return 0.1*speller_loss
-        self.speller_loss_fn = speller_loss_fn
+            return 1.0*speller_loss
+        self.speller_loss_fn = None
 
     def __call__(
         self,
         limited_vocab,
         word_ids, word_embeds, encodes,
         valid_masks, pick_masks,
+        attn_word_ids, attn_word_embeds,
+        attn_encodes, attn_valid_masks,
         global_encodes, field_prior_embeds,
-        candidate_ids=None, candidate_embeds=None, target_seqs=None,
-        copy_word_ids=None, copy_embeds=None, copy_encodes=None, copy_masks=None):
+        candidate_word_ids, candidate_word_embeds,
+        candidate_valid_masks=None,
+        target_seqs=None):
         """
         add speller loss if not limited_vocab
         """
         with tf.variable_scope(self.scope, reuse=True):
             speller_loss_fn = None if limited_vocab else self.speller_loss_fn
-            loss = train_masked(
+            loss, accuracy = train_masked(
                 self.matcher,
                 limited_vocab,
                 word_ids, word_embeds, encodes,
                 valid_masks, pick_masks,
+                attn_word_ids, attn_word_embeds,
+                attn_encodes, attn_valid_masks,
                 self.global_matcher, global_encodes,
                 field_prior_embeds,
-                candidate_ids, candidate_embeds, target_seqs,
-                copy_word_ids, copy_embeds, copy_encodes, copy_masks,
-                extra_loss_fn=None,
+                candidate_word_ids, candidate_word_embeds,
+                candidate_valid_masks,
+                target_seqs,
+                extra_loss_fn=speller_loss_fn,
             )
 
-        return loss
+        return loss, accuracy
 
 class SentTrainer(object):
     """get the loss of a sent"""
@@ -698,27 +705,33 @@ class SentTrainer(object):
         initial_state,
         limited_vocab,
         word_ids, word_embeds, valid_masks,
+        attn_word_ids, attn_word_embeds,
+        attn_encodes, attn_valid_masks,
         global_encodes, field_prior_embeds,
-        candidate_ids=None, candidate_embeds=None, target_seqs=None,
-        copy_word_ids=None, copy_embeds=None, copy_encodes=None, copy_masks=None):
+        candidate_word_ids, candidate_word_embeds,
+        candidate_valid_masks=None,
+        target_seqs=None):
         """
         feed the inputs into cell, get the outputs, and then get the loss
         """
         with tf.variable_scope(self.scope, reuse=True):
             speller_loss_fn = None if limited_vocab else self.word_trainer.speller_loss_fn
-            loss = train_seq(
+            loss, accuracy = train_seq(
                 initial_state,
                 self.cell, self.word_trainer.matcher,
                 limited_vocab,
                 word_ids, word_embeds, valid_masks,
+                attn_word_ids, attn_word_embeds,
+                attn_encodes, attn_valid_masks,
                 self.word_trainer.global_matcher, global_encodes,
                 field_prior_embeds,
-                candidate_ids, candidate_embeds, target_seqs,
-                copy_word_ids, copy_embeds, copy_encodes, copy_masks,
+                candidate_word_ids, candidate_word_embeds,
+                candidate_valid_masks,
+                target_seqs,
                 extra_loss_fn=speller_loss_fn,
             )
 
-        return loss
+        return loss, accuracy
 
 
 """Generator"""
@@ -907,7 +920,7 @@ class SentGenerator(object):
         self.word_embedder = word_embedder
         self.word_generator = word_generator
         self.decoder = lambda *args, **kwargs: model_utils_py3.beam_dec(
-            *args, **kwargs, beam_size=16, num_candidates=1, cutoff_rate=0.1)
+            *args, **kwargs, beam_size=2, num_candidates=1, cutoff_rate=0.1)
 
     def generate(
         self,
@@ -1206,7 +1219,7 @@ class ClassGenerator(object):
                     (word_embedding, None, 'embed'))
             else:
                 token_prior_logits = tf.expand_dims(
-                    tf.nn.log_softmax(word_priors), axis=0)
+                    tf.log(word_priors), axis=0)
             extra_logits = sample_token_logits + token_prior_logits
             def candidates_fn(encodes):
                 context_token_logits = self.word_matcher(
