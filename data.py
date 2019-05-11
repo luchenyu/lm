@@ -175,7 +175,8 @@ class Dataset(object):
         def _featurize(text):
             text = text.numpy().decode('utf-8').strip()
             segments = text.split(self.data_config['segment_delim'])
-            def _tokenize(field_id, segment):
+            random_start_end = {}
+            def _tokenize(field_id, segment, group_id):
                 segment = segment.strip()
                 if segment == '':
                     seqs = []
@@ -186,8 +187,13 @@ class Dataset(object):
                     # random sampling if too long
                     max_seq_length = mapped_schema[field_id].get('max_seq_length')
                     if (not max_seq_length is None) and len(words) > max_seq_length:
-                        start = random.randint(0, len(words)-max_seq_length+1)
-                        words = words[start:start+max_seq_length]
+                        if not random_start_end.get(group_id) is None:
+                            start, end = random_start_end[group_id]
+                        else:
+                            start = random.randint(0, len(words)-max_seq_length+1)
+                            end = start+max_seq_length
+                            random_start_end[group_id] = (start, end)
+                        words = words[start:end]
                     # tokenize
                     if mapped_schema[field_id]['limited_vocab']:
                         token_vocab = mapped_schema[field_id]['token_vocab']
@@ -212,10 +218,10 @@ class Dataset(object):
                 segs = np.array(segs, dtype=np.float32)
                 return [seqs, segs]
             features = sum(
-                [_tokenize(item['field_id'], segments[item['segment_id']])
+                [_tokenize(item['field_id'], segments[item['segment_id']], mapped_schema[i]['group_id'])
                  if not item['segment_id'] is None else
-                 _tokenize(item['field_id'], '')
-                 for item in mapped_index], [])
+                 _tokenize(item['field_id'], '', mapped_schema[i]['group_id'])
+                 for i, item in enumerate(mapped_index)], [])
             return features
 
         def _format(features):
