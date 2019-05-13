@@ -1854,7 +1854,7 @@ class Model(object):
                                 if not copy_ids is None:
                                     copy_ids = tf.pad(
                                         copy_ids,
-                                        [[0,0],[0,0],[0,max_token_length-tf.shape(copy_ids)[2]]])
+                                        [[0,0],[0,0],[0,tf.maximum(max_token_length-tf.shape(copy_ids)[2], 0)]])
                                     copy_ids = copy_ids[:,:,:max_token_length]
                                     nosep_masks = tf.reduce_any(
                                         tf.not_equal(
