@@ -1812,8 +1812,17 @@ class Model(object):
                         copy_word_ids = model_utils_py3.pad_vectors(
                             copy_word_ids)
                         copy_word_ids = tf.concat(copy_word_ids, axis=1)
+                        sep_ids = tf.constant(
+                            [[self.char_vocab.token2id[self.char_vocab.sep]]],
+                            dtype=tf.int32)
+                        sep_ids = tf.pad(sep_ids, [[0,0],[tf.shape(copy_word_ids)[-1]-1,0]])
+                        nosep_masks = tf.reduce_any(
+                            tf.not_equal(
+                                copy_word_ids, tf.expand_dims(sep_ids, axis=0)),
+                            axis=-1)
                         copy_word_embeds = tf.concat(copy_word_embeds, axis=1)
                         copy_valid_masks = tf.concat(copy_valid_masks, axis=1)
+                        copy_valid_masks = tf.logical_and(copy_valid_masks, nosep_masks)
                     else:
                         copy_word_ids, copy_word_embeds, copy_valid_masks \
                         = None, None, None
