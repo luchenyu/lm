@@ -920,16 +920,19 @@ class SentGenerator(object):
         self.word_embedder = word_embedder
         self.word_generator = word_generator
         self.decoder = lambda *args, **kwargs: model_utils_py3.beam_dec(
-            *args, **kwargs, beam_size=2, num_candidates=1, cutoff_rate=0.1)
+            *args, **kwargs, beam_size=16, num_candidates=1, cutoff_rate=0.1)
 
     def generate(
         self,
         initial_state,
         length,
+        attn_word_ids, attn_word_embeds,
+        attn_encodes, attn_valid_masks,
         global_encodes, field_prior_embeds,
-        word_embedding, word_ids,
+        static_word_ids, static_word_embeds,
         gen_word_len=None,
-        copy_embeds=None, copy_ids=None, copy_masks=None, copy_encodes=None,
+        copy_word_ids=None, copy_word_embeds=None,
+        copy_valid_masks=None,
         min_length=1):
         """
         args:
@@ -945,6 +948,7 @@ class SentGenerator(object):
             copy_embeds_matcher: batch_size x num_words x matcher_dim
         """
         batch_size = tf.shape(global_encodes)[0]
+        embed_dim = static_word_embeds.get_shape()[-1].value
         def state_si_fn(state):
             state_si = TransformerState(
                 field_query_embedding=tuple(
@@ -963,29 +967,47 @@ class SentGenerator(object):
                 enc_tfstruct=model_utils_py3.get_tfstruct_si(state.enc_tfstruct))
             return state_si
 
+        do_attn = not (
+            attn_word_ids is None or
+            attn_word_embeds is None or
+            attn_encodes is None or
+            attn_valid_masks is None)
+
         candidates_fn_list = []
         max_word_len = gen_word_len if not gen_word_len is None else 0
-        if not word_ids is None:
-            max_word_len = tf.maximum(max_word_len, tf.shape(word_ids)[-1])
-        if not copy_ids is None:
-            max_word_len = tf.maximum(max_word_len, tf.shape(copy_ids)[-1])
+        if not static_word_ids is None and len(static_word_ids.get_shape()) == 2:
+            max_word_len = tf.maximum(max_word_len, tf.shape(static_word_ids)[-1])
+        if not copy_word_ids is None and len(copy_word_ids.get_shape()) == 3:
+            max_word_len = tf.maximum(max_word_len, tf.shape(copy_word_ids)[-1])
 
         global_latents = self.global_matcher.cache_contexts(global_encodes)
 
-        start_id = word_ids[0]
-        start_embedding = word_embedding[0]
         # static vocab
-        if len(word_ids.get_shape()) == 2:
-            word_ids = tf.pad(
-                word_ids, [[0,0],[0,max_word_len-tf.shape(word_ids)[1]]])
-        self.word_matcher.cache_embeds(word_embedding)
+        static_length = tf.shape(static_word_ids)[0]
+        if len(static_word_ids.get_shape()) == 2:
+            static_word_ids = tf.pad(
+                static_word_ids, [[0,0],[0,max_word_len-tf.shape(static_word_ids)[1]]])
+        start_id = static_word_ids[0]
+        start_embedding = static_word_embeds[0]
+        self.word_matcher.cache_embeds(static_word_embeds)
         sample_token_logits = self.global_matcher(
             (global_latents, None, 'latent'),
-            (word_embedding, None, 'embed'))
+            (static_word_embeds, None, 'embed'))
         token_prior_logits = self.global_matcher(
             (field_prior_embeds, None, 'latent'),
-            (word_embedding, None, 'embed'))
+            (static_word_embeds, None, 'embed'))
         extra_logits = sample_token_logits + token_prior_logits
+
+        if do_attn:
+            attn_seq_length = tf.shape(attn_word_ids)[1]
+            attn_word_embeds_flatten = tf.reshape(
+                attn_word_embeds, [batch_size*attn_seq_length, embed_dim])
+            candidate_copy_logits = self.word_matcher(
+                (attn_word_embeds_flatten, None, 'latent'),
+                (static_word_embeds, None, 'latent'))
+            candidate_copy_logits = tf.reshape(
+                candidate_copy_logits, [batch_size, attn_seq_length, static_length])
+
         def candidates_fn(encodes):
             encode_dim = encodes.get_shape()[-1].value
             encodes_reshaped = tf.reshape(
@@ -993,7 +1015,7 @@ class SentGenerator(object):
             beam_size = tf.shape(encodes_reshaped)[1]
             context_token_logits = self.word_matcher(
                 (encodes, None, 'context'),
-                (word_embedding, None, 'embed'))
+                (static_word_embeds, None, 'embed'))
             extra_logits_tiled = tf.tile(
                 tf.expand_dims(extra_logits, axis=1),
                 [1,beam_size,1])
@@ -1001,83 +1023,101 @@ class SentGenerator(object):
                 extra_logits_tiled,
                 [batch_size*beam_size, -1])
             logits = context_token_logits + extra_logits_tiled
-            return word_embedding, word_ids, None, logits
+            if do_attn:
+                attn_logits = self.word_matcher(
+                    (encodes_reshaped, None, 'context'),
+                    (attn_encodes, None, 'encode'))
+                masks_fp = tf.cast(
+                    tf.expand_dims(attn_valid_masks, axis=1), tf.float32)
+                attn_logits *= masks_fp
+                attn_weights = tf.exp(tf.math.abs(attn_logits)) * masks_fp
+                attn_weights /= tf.maximum(
+                    tf.reduce_sum(attn_weights, axis=2, keepdims=True), 1e-12)
+                attn_logits *= attn_weights
+                copy_logits = tf.matmul(attn_logits, candidate_copy_logits)
+                logits += tf.reshape(copy_logits, [batch_size*beam_size, static_length])
+            return static_word_embeds, static_word_ids, None, logits
         candidates_fn_list.append(candidates_fn)
 
-        # dynamic gen
-        if not gen_word_len is None:
-            def candidates_fn(encodes):
-                encode_dim = encodes.get_shape()[-1].value
-                batch_beam_size = tf.shape(encodes)[0]
-                encodes_reshaped = tf.reshape(
-                    encodes, [batch_size, -1, encode_dim])
-                beam_size = tf.shape(encodes_reshaped)[1]
-                speller_encoder = self.word_generator.speller_cell.assets['encoder']
-                null_tfstruct = model_utils_py3.init_tfstruct(
-                    batch_beam_size, speller_encoder.embed_size, speller_encoder.posit_size,
-                    speller_encoder.layer_size, speller_encoder.num_layers)
-                speller_initial_state = SpellerState(
-                    word_encodes=encodes,
-                    dec_masks=tf.zeros([batch_beam_size, 0], dtype=tf.bool),
-                    dec_keys=(
-                        tf.zeros([batch_beam_size, 0, speller_encoder.layer_size]),
-                    )*speller_encoder.num_layers,
-                    dec_values=(
-                        tf.zeros([batch_beam_size, 0, speller_encoder.layer_size]),
-                    )*speller_encoder.num_layers)
-                word_ids, word_scores = self.word_generator.generate(
-                    speller_initial_state, max_word_len)
-                word_scores = tf.exp(word_scores)
-                word_embeds, word_masks = self.word_embedder(word_ids)
-                word_masks = tf.logical_and(
-                    word_masks,
-                    tf.not_equal(word_scores, 0.0))
-                word_ids = tf.pad(word_ids, [[0,0],[0,0],[0,max_word_len-tf.shape(word_ids)[2]]])
-                num_candidates = tf.shape(word_ids)[1]
+        # # dynamic gen
+        # if not gen_word_len is None:
+        #     def candidates_fn(encodes):
+        #         encode_dim = encodes.get_shape()[-1].value
+        #         batch_beam_size = tf.shape(encodes)[0]
+        #         encodes_reshaped = tf.reshape(
+        #             encodes, [batch_size, -1, encode_dim])
+        #         beam_size = tf.shape(encodes_reshaped)[1]
+        #         speller_encoder = self.word_generator.speller_cell.assets['encoder']
+        #         null_tfstruct = model_utils_py3.init_tfstruct(
+        #             batch_beam_size, speller_encoder.embed_size, speller_encoder.posit_size,
+        #             speller_encoder.layer_size, speller_encoder.num_layers)
+        #         speller_initial_state = SpellerState(
+        #             word_encodes=encodes,
+        #             dec_masks=tf.zeros([batch_beam_size, 0], dtype=tf.bool),
+        #             dec_keys=(
+        #                 tf.zeros([batch_beam_size, 0, speller_encoder.layer_size]),
+        #             )*speller_encoder.num_layers,
+        #             dec_values=(
+        #                 tf.zeros([batch_beam_size, 0, speller_encoder.layer_size]),
+        #             )*speller_encoder.num_layers)
+        #         word_ids, word_scores = self.word_generator.generate(
+        #             speller_initial_state, max_word_len)
+        #         word_scores = tf.exp(word_scores)
+        #         word_embeds, word_masks = self.word_embedder(word_ids)
+        #         word_masks = tf.logical_and(
+        #             word_masks,
+        #             tf.not_equal(word_scores, 0.0))
+        #         word_ids = tf.pad(word_ids, [[0,0],[0,0],[0,max_word_len-tf.shape(word_ids)[2]]])
+        #         num_candidates = tf.shape(word_ids)[1]
 
-                sample_token_logits_local = self.global_matcher(
-                    (tf.reshape(
-                        word_embeds,
-                        [batch_size, beam_size*num_candidates, self.word_embedder.layer_size]),
-                     None, 'embed'),
-                    (tf.expand_dims(global_latents, axis=1), None, 'latent'))
-                sample_token_logits_local = tf.reshape(
-                    sample_token_logits_local, [batch_size*beam_size, num_candidates])
-                token_prior_logits_local = self.global_matcher(
-                    (tf.reshape(
-                        word_embeds,
-                        [batch_size*beam_size*num_candidates, self.word_embedder.layer_size]),
-                     None, 'embed'),
-                    (field_prior_embeds, None, 'latent'))
-                token_prior_logits_local = tf.reshape(
-                    token_prior_logits_local, [batch_size*beam_size, num_candidates])
-                extra_logits_local = sample_token_logits_local + token_prior_logits_local
-                context_token_logits = self.word_matcher(
-                    (tf.expand_dims(encodes, axis=1), None, 'context'),
-                    (word_embeds, None, 'embed'))
-                context_token_logits = tf.squeeze(
-                    context_token_logits, [1])
-                logits = context_token_logits + extra_logits_local
-                return word_embeds, word_ids, word_masks, logits
-            candidates_fn_list.append(candidates_fn)
+        #         sample_token_logits_local = self.global_matcher(
+        #             (tf.reshape(
+        #                 word_embeds,
+        #                 [batch_size, beam_size*num_candidates, self.word_embedder.layer_size]),
+        #              None, 'embed'),
+        #             (tf.expand_dims(global_latents, axis=1), None, 'latent'))
+        #         sample_token_logits_local = tf.reshape(
+        #             sample_token_logits_local, [batch_size*beam_size, num_candidates])
+        #         token_prior_logits_local = self.global_matcher(
+        #             (tf.reshape(
+        #                 word_embeds,
+        #                 [batch_size*beam_size*num_candidates, self.word_embedder.layer_size]),
+        #              None, 'embed'),
+        #             (field_prior_embeds, None, 'latent'))
+        #         token_prior_logits_local = tf.reshape(
+        #             token_prior_logits_local, [batch_size*beam_size, num_candidates])
+        #         extra_logits_local = sample_token_logits_local + token_prior_logits_local
+        #         context_token_logits = self.word_matcher(
+        #             (tf.expand_dims(encodes, axis=1), None, 'context'),
+        #             (word_embeds, None, 'embed'))
+        #         context_token_logits = tf.squeeze(
+        #             context_token_logits, [1])
+        #         logits = context_token_logits + extra_logits_local
+        #         return word_embeds, word_ids, word_masks, logits
+        #     candidates_fn_list.append(candidates_fn)
 
         # copy
-        if not (copy_embeds is None or copy_ids is None or copy_masks is None or copy_encodes is None):
-            embed_dim = copy_embeds.get_shape()[-1].value
-            num_copies = tf.shape(copy_embeds)[1]
-            copy_ids = tf.pad(
-                copy_ids, [[0,0],[0,0],[0,max_word_len-tf.shape(copy_ids)[2]]])
-            copy_embed_projs = self.word_matcher.cache_embeds(copy_embeds)
-            copy_encode_projs = self.word_matcher.cache_encodes(copy_encodes)
+        if not (copy_word_ids is None or copy_word_embeds is None or copy_valid_masks is None):
+            copy_seq_length = tf.shape(copy_word_ids)[1]
+            if len(copy_word_ids.get_shape()) == 3:
+                copy_word_ids = tf.pad(
+                    copy_word_ids, [[0,0],[0,0],[0,max_word_len-tf.shape(copy_word_ids)[2]]])
+            copy_word_embed_projs = self.word_matcher.cache_embeds(copy_word_embeds)
             sample_token_logits_copy = self.global_matcher(
                 (tf.expand_dims(global_latents, axis=1), None, 'latent'),
-                (copy_embeds, None, 'embed'))
+                (copy_word_embeds, None, 'embed'))
             token_prior_logits_copy = self.global_matcher(
                 (field_prior_embeds, None, 'latent'),
-                (tf.reshape(copy_embeds, [batch_size*num_copies, embed_dim]), None, 'embed'))
+                (tf.reshape(copy_word_embeds, [batch_size*copy_seq_length, embed_dim]), None, 'embed'))
             token_prior_logits_copy = tf.reshape(
-                token_prior_logits_copy, [batch_size, 1, num_copies])
+                token_prior_logits_copy, [batch_size, 1, copy_seq_length])
             extra_logits_copy = sample_token_logits_copy + token_prior_logits_copy
+
+            if do_attn:
+                candidate_copy_logits_copy = self.word_matcher(
+                    (attn_word_embeds, None, 'latent'),
+                    (copy_word_embeds, None, 'latent'))
+
             def candidates_fn(encodes):
                 encode_dim = encodes.get_shape()[-1].value
                 encodes_reshaped = tf.reshape(
@@ -1086,58 +1126,54 @@ class SentGenerator(object):
                 extra_logits_tiled = tf.tile(
                     extra_logits_copy, [1,beam_size,1])
                 extra_logits_tiled = tf.reshape(
-                    extra_logits_tiled, [batch_size*beam_size, num_copies])
+                    extra_logits_tiled, [batch_size*beam_size, copy_seq_length])
 
-                copy_embeds_tiled = tf.tile(
-                    tf.expand_dims(copy_embeds, axis=1),
+                copy_word_embeds_tiled = tf.tile(
+                    tf.expand_dims(copy_word_embeds, axis=1),
                     [1,beam_size,1,1])
-                copy_embeds_tiled = tf.reshape(
-                    copy_embeds_tiled,
-                    [batch_size*beam_size, num_copies, embed_dim])
-                if len(copy_ids.get_shape()) == 3:
-                    copy_ids_tiled = tf.tile(
-                        tf.expand_dims(copy_ids, axis=1),
+                copy_word_embeds_tiled = tf.reshape(
+                    copy_word_embeds_tiled,
+                    [batch_size*beam_size, copy_seq_length, embed_dim])
+                if len(copy_word_ids.get_shape()) == 3:
+                    copy_word_ids_tiled = tf.tile(
+                        tf.expand_dims(copy_word_ids, axis=1),
                         [1,beam_size,1,1])
-                    copy_ids_tiled = tf.reshape(
-                        copy_ids_tiled,
-                        [batch_size*beam_size, num_copies, -1])
-                elif len(copy_ids.get_shape()) == 2:
-                    copy_ids_tiled = tf.tile(
-                        tf.expand_dims(copy_ids, axis=1),
+                    copy_word_ids_tiled = tf.reshape(
+                        copy_word_ids_tiled,
+                        [batch_size*beam_size, copy_seq_length, -1])
+                elif len(copy_word_ids.get_shape()) == 2:
+                    copy_word_ids_tiled = tf.tile(
+                        tf.expand_dims(copy_word_ids, axis=1),
                         [1,beam_size,1])
-                    copy_ids_tiled = tf.reshape(
-                        copy_ids_tiled,
-                        [batch_size*beam_size, num_copies])
-                copy_masks_tiled = tf.tile(
-                    tf.expand_dims(copy_masks, axis=1),
+                    copy_word_ids_tiled = tf.reshape(
+                        copy_word_ids_tiled,
+                        [batch_size*beam_size, copy_seq_length])
+                copy_valid_masks_tiled = tf.tile(
+                    tf.expand_dims(copy_valid_masks, axis=1),
                     [1,beam_size,1])
-                copy_masks_tiled = tf.reshape(
-                    copy_masks_tiled,
-                    [batch_size*beam_size, num_copies])
-                copy_embed_projs_tiled = tf.tile(
-                    tf.expand_dims(copy_embed_projs, axis=1),
-                    [1,beam_size,1,1])
-                copy_embed_projs_tiled = tf.reshape(
-                    copy_embed_projs_tiled,
-                    [batch_size*beam_size, num_copies, self.word_matcher.layer_size])
-                copy_encode_projs_tiled = tf.tile(
-                    tf.expand_dims(copy_encode_projs, axis=1),
-                    [1,beam_size,1,1])
-                copy_encode_projs_tiled = tf.reshape(
-                    copy_encode_projs_tiled,
-                    [batch_size*beam_size, num_copies, self.word_matcher.layer_size])
-                encodes_expanded = tf.expand_dims(encodes, axis=1)
+                copy_valid_masks_tiled = tf.reshape(
+                    copy_valid_masks_tiled,
+                    [batch_size*beam_size, copy_seq_length])
                 context_token_logits = self.word_matcher(
-                    (encodes_expanded, None, 'context'),
-                    (copy_embed_projs_tiled, None, 'latent'))
-                copy_logits = self.word_matcher(
-                    (encodes_expanded, None, 'context'),
-                    (copy_encode_projs_tiled, None, 'latent'))
-                context_token_logits += copy_logits
-                context_token_logits = tf.squeeze(
-                    context_token_logits, [1])
+                    (encodes_reshaped, None, 'context'),
+                    (copy_word_embed_projs, None, 'latent'))
+                context_token_logits = tf.reshape(
+                    context_token_logits, [batch_size*beam_size, copy_seq_length])
                 logits = context_token_logits + extra_logits_tiled
-                return copy_embeds_tiled, copy_ids_tiled, copy_masks_tiled, logits
+                if do_attn:
+                    attn_logits = self.word_matcher(
+                        (encodes_reshaped, None, 'context'),
+                        (attn_encodes, None, 'encode'))
+                    masks_fp = tf.cast(
+                        tf.expand_dims(attn_valid_masks, axis=1), tf.float32)
+                    attn_logits *= masks_fp
+                    attn_weights = tf.exp(tf.math.abs(attn_logits)) * masks_fp
+                    attn_weights /= tf.maximum(
+                        tf.reduce_sum(attn_weights, axis=2, keepdims=True), 1e-12)
+                    attn_logits *= attn_weights
+                    copy_logits = tf.matmul(attn_logits, candidate_copy_logits_copy)
+                    logits += tf.reshape(copy_logits, [batch_size*beam_size, copy_seq_length])
+                return copy_word_embeds_tiled, copy_word_ids_tiled, copy_valid_masks_tiled, logits
             candidates_fn_list.append(candidates_fn)
 
         if min_length is None:
@@ -1177,13 +1213,18 @@ class ClassGenerator(object):
         self.word_embedder = word_embedder
         self.word_generator = word_generator
 
-    def generate(self,
-                 tfstruct,
-                 extra_tfstruct,
-                 global_encodes, field_prior_embeds,
-                 word_embedding=None, word_ids=None, word_priors=None,
-                 gen_word_len=None,
-                 copy_embeds=None, copy_ids=None, copy_masks=None, copy_encodes=None):
+    def generate(
+        self,
+        tfstruct,
+        extra_tfstruct,
+        attn_word_ids, attn_word_embeds,
+        attn_encodes, attn_valid_masks,
+        global_encodes, field_prior_embeds,
+        static_word_ids=None, static_word_embeds=None,
+        static_word_priors=None,
+        gen_word_len=None,
+        copy_word_ids=None, copy_word_embeds=None,
+        copy_valid_masks=None):
         """
         args:
             max_word_len: int
@@ -1205,102 +1246,158 @@ class ClassGenerator(object):
         word_encodes = tf.squeeze(word_encodes, [1])
         global_latents = self.global_matcher.cache_contexts(global_encodes)
 
+        max_word_len = gen_word_len if not gen_word_len is None else 0
+        if not static_word_ids is None and len(static_word_ids.get_shape()) == 2:
+            max_word_len = tf.maximum(max_word_len, tf.shape(static_word_ids)[-1])
+        if not copy_word_ids is None and len(copy_word_ids.get_shape()) == 3:
+            max_word_len = tf.maximum(max_word_len, tf.shape(copy_word_ids)[-1])
+
+        do_attn = not (
+            attn_word_ids is None or
+            attn_word_embeds is None or
+            attn_encodes is None or
+            attn_valid_masks is None)
+
         # static vocab
-        if not (word_embedding is None or word_ids is None):
-            if len(word_ids.get_shape()) == 2:
-                word_ids = tf.pad(
-                    word_ids, [[0,0],[0,max_word_len-tf.shape(word_ids)[1]]])
+        if not (static_word_ids is None or static_word_embeds is None):
+            static_length = tf.shape(static_word_ids)[0]
+            if len(static_word_ids.get_shape()) == 2:
+                static_word_ids = tf.pad(
+                    static_word_ids, [[0,0],[0,max_word_len-tf.shape(static_word_ids)[1]]])
             sample_token_logits = self.global_matcher(
                 (global_latents, None, 'latent'),
-                (word_embedding, None, 'embed'))
+                (static_word_embeds, None, 'embed'))
             if word_priors is None:
                 token_prior_logits = self.global_matcher(
                     (field_prior_embeds, None, 'latent'),
-                    (word_embedding, None, 'embed'))
+                    (static_word_embeds, None, 'embed'))
             else:
                 token_prior_logits = tf.expand_dims(
-                    tf.log(word_priors), axis=0)
+                    tf.log(static_word_priors), axis=0)
             extra_logits = sample_token_logits + token_prior_logits
+
+            if do_attn:
+                attn_seq_length = tf.shape(attn_word_ids)[1]
+                attn_word_embeds_flatten = tf.reshape(
+                    attn_word_embeds, [batch_size*attn_seq_length, embed_dim])
+                candidate_copy_logits = self.word_matcher(
+                    (attn_word_embeds_flatten, None, 'latent'),
+                    (static_word_embeds, None, 'latent'))
+                candidate_copy_logits = tf.reshpe(
+                    candidate_copy_logits, [batch_size, attn_seq_length, static_length])
+
             def candidates_fn(encodes):
                 context_token_logits = self.word_matcher(
                     (encodes, None, 'context'),
-                    (word_embedding, None, 'embed'))
+                    (static_word_embeds, None, 'embed'))
                 logits = context_token_logits + extra_logits
-                return word_embedding, word_ids, None, logits
+                if do_attn:
+                    attn_logits = self.word_matcher(
+                        (tf.expand_dims(encodes, axis=1), None, 'context'),
+                        (attn_encodes, None, 'encode'))
+                    masks_fp = tf.cast(
+                        tf.expand_dims(attn_valid_masks, axis=1), tf.float32)
+                    attn_logits *= masks_fp
+                    attn_weights = tf.exp(tf.math.abs(attn_logits)) * masks_fp
+                    attn_weights /= tf.maximum(
+                        tf.reduce_sum(attn_weights, axis=2, keepdims=True), 1e-12)
+                    attn_logits *= attn_weights
+                    copy_logits = tf.matmul(attn_logits, candidate_copy_logits)
+                    logits += tf.reshape(copy_logits, [batch_size, static_length])
+                return static_word_embeds, static_word_ids, None, logits
             candidates_fn_list.append(candidates_fn)
 
-        # dynamic gen
-        if not gen_word_len is None:
-            def candidates_fn(encodes):
-                speller_encoder = self.word_generator.cell.assets['encoder']
-                null_tfstruct = model_utils_py3.init_tfstruct(
-                    batch_size, speller_encoder.embed_size, speller_encoder.posit_size,
-                    speller_encoder.layer_size, speller_encoder.num_layers)
-                speller_initial_state = SpellerState(
-                    word_encodes=encodes,
-                    dec_masks=tf.zeros([batch_size, 0], dtype=tf.bool),
-                    dec_keys=(
-                        tf.zeros([batch_size, 0, speller_encoder.layer_size]),
-                    )*speller_encoder.num_layers,
-                    dec_values=(
-                        tf.zeros([batch_size, 0, speller_encoder.layer_size]),
-                    )*speller_encoder.num_layers)
-                word_ids, word_scores = self.word_generator.generate(
-                    speller_initial_state, max_word_len)
-                word_scores = tf.exp(word_scores)
-                word_embeds, word_masks = self.word_embedder(word_ids)
-                word_masks = tf.logical_and(
-                    word_masks,
-                    tf.not_equal(word_scores, 0.0))
-                word_ids = tf.pad(word_ids, [[0,0],[0,0],[0,max_word_len-tf.shape(word_ids)[2]]])
-                num_candidates = tf.shape(word_ids)[1]
+        # # dynamic gen
+        # if not gen_word_len is None:
+        #     def candidates_fn(encodes):
+        #         speller_encoder = self.word_generator.cell.assets['encoder']
+        #         null_tfstruct = model_utils_py3.init_tfstruct(
+        #             batch_size, speller_encoder.embed_size, speller_encoder.posit_size,
+        #             speller_encoder.layer_size, speller_encoder.num_layers)
+        #         speller_initial_state = SpellerState(
+        #             word_encodes=encodes,
+        #             dec_masks=tf.zeros([batch_size, 0], dtype=tf.bool),
+        #             dec_keys=(
+        #                 tf.zeros([batch_size, 0, speller_encoder.layer_size]),
+        #             )*speller_encoder.num_layers,
+        #             dec_values=(
+        #                 tf.zeros([batch_size, 0, speller_encoder.layer_size]),
+        #             )*speller_encoder.num_layers)
+        #         word_ids, word_scores = self.word_generator.generate(
+        #             speller_initial_state, max_word_len)
+        #         word_scores = tf.exp(word_scores)
+        #         word_embeds, word_masks = self.word_embedder(word_ids)
+        #         word_masks = tf.logical_and(
+        #             word_masks,
+        #             tf.not_equal(word_scores, 0.0))
+        #         word_ids = tf.pad(word_ids, [[0,0],[0,0],[0,max_word_len-tf.shape(word_ids)[2]]])
+        #         num_candidates = tf.shape(word_ids)[1]
 
-                sample_token_logits_local = self.global_matcher(
-                    (tf.expand_dims(global_latents, axis=1), None, 'latent'),
-                    (word_embeds, None, 'embed'))
-                token_prior_logits_local = self.global_matcher(
-                    (field_prior_embeds, None, 'latent'),
-                    (tf.reshape(
-                        word_embeds,
-                        [batch_size*num_candidates, self.word_embedder.layer_size]),
-                     None, 'embed'))
-                token_prior_logits_local = tf.reshape(
-                    token_prior_logits_local, [batch_size, 1, num_candidates])
-                extra_logits_local = sample_token_logits_local + token_prior_logits_local
-                context_token_logits = self.word_matcher(
-                    (tf.expand_dims(encodes, axis=1), None, 'context'),
-                    (word_embeds, None, 'embed'))
-                logits = context_token_logits + extra_logits_local
-                logits = tf.squeeze(logits, [1])
-                return word_embeds, word_ids, word_masks, logits
-            candidates_fn_list.append(candidates_fn)
+        #         sample_token_logits_local = self.global_matcher(
+        #             (tf.expand_dims(global_latents, axis=1), None, 'latent'),
+        #             (word_embeds, None, 'embed'))
+        #         token_prior_logits_local = self.global_matcher(
+        #             (field_prior_embeds, None, 'latent'),
+        #             (tf.reshape(
+        #                 word_embeds,
+        #                 [batch_size*num_candidates, self.word_embedder.layer_size]),
+        #              None, 'embed'))
+        #         token_prior_logits_local = tf.reshape(
+        #             token_prior_logits_local, [batch_size, 1, num_candidates])
+        #         extra_logits_local = sample_token_logits_local + token_prior_logits_local
+        #         context_token_logits = self.word_matcher(
+        #             (tf.expand_dims(encodes, axis=1), None, 'context'),
+        #             (word_embeds, None, 'embed'))
+        #         logits = context_token_logits + extra_logits_local
+        #         logits = tf.squeeze(logits, [1])
+        #         return word_embeds, word_ids, word_masks, logits
+        #     candidates_fn_list.append(candidates_fn)
 
         # copy
-        if not (copy_embeds is None or copy_ids is None or copy_masks is None or copy_encodes is None):
-            embed_dim = copy_embeds.get_shape()[-1].value
-            num_copies = tf.shape(copy_embeds)[1]
+        if not (copy_word_ids is None or copy_word_embeds is None or copy_valid_masks is None):
+            embed_dim = copy_word_embeds.get_shape()[-1].value
+            copy_seq_length = tf.shape(copy_word_embeds)[1]
+            if len(copy_word_ids.get_shape()) == 3:
+                copy_word_ids = tf.pad(
+                    copy_word_ids, [[0,0],[0,0],[0,max_word_len-tf.shape(copy_word_ids)[2]]])
             sample_token_logits_copy = self.global_matcher(
                 (tf.expand_dims(global_latents, axis=1), None, 'latent'),
-                (copy_embeds, None, 'embed'))
+                (copy_word_embeds, None, 'embed'))
             token_prior_logits_copy = self.global_matcher(
                 (field_prior_embeds, None, 'latent'),
-                (tf.reshape(copy_embeds, [batch_size*num_copies, embed_dim]), None, 'embed'))
+                (tf.reshape(copy_word_embeds, [batch_size*copy_seq_length, embed_dim]), None, 'embed'))
             token_prior_logits_copy = tf.reshape(
-                token_prior_logits_copy, [batch_size, 1, num_copies])
+                token_prior_logits_copy, [batch_size, 1, copy_seq_length])
             extra_logits_copy = sample_token_logits_copy + token_prior_logits_copy
+            extra_logits_copy = tf.squeeze(extra_logits_copy, [1])
+
+            if do_attn:
+                candidate_copy_logits = self.word_matcher(
+                    (attn_word_embeds, None, 'latent'),
+                    (copy_word_embeds, None, 'latent'))
+
             def candidates_fn(encodes):
                 encodes_expanded = tf.expand_dims(encodes, axis=1)
                 context_token_logits = self.word_matcher(
                     (encodes_expanded, None, 'context'),
-                    (copy_embeds, None, 'embed'))
-                copy_logits = self.word_matcher(
-                    (encodes_expanded, None, 'context'),
-                    (copy_encodes, None, 'encode'))
-                context_token_logits += copy_logits
+                    (copy_word_embeds, None, 'embed'))
+                context_token_logits = tf.squeeze(context_token_logits, [1])
                 logits = context_token_logits + extra_logits_copy
-                logits = tf.squeeze(logits, [1])
-                logits += tf.log(tf.cast(copy_masks, tf.float32))
-                return copy_embeds, copy_ids, copy_masks, logits
+                if do_attn:
+                    attn_logits = self.word_matcher(
+                        (encodes_expanded, None, 'context'),
+                        (attn_encodes, None, 'encode'))
+                    masks_fp = tf.cast(
+                        tf.expand_dims(attn_valid_masks, axis=1), tf.float32)
+                    attn_logits *= masks_fp
+                    attn_weights = tf.exp(tf.math.abs(attn_logits)) * masks_fp
+                    attn_weights /= tf.maximum(
+                        tf.reduce_sum(attn_weights, axis=2, keepdims=True), 1e-12)
+                    attn_logits *= attn_weights
+                    copy_logits = tf.matmul(attn_logits, candidate_copy_logits)
+                    logits += tf.reshape(copy_logits, [batch_size, copy_seq_length])
+                logits += tf.log(tf.cast(copy_valid_masks, tf.float32))
+                return copy_word_embeds, copy_word_ids, copy_valid_masks, logits
             candidates_fn_list.append(candidates_fn)
 
         concat_embeds, concat_ids, concat_masks, concat_logits = concat_candidates(
