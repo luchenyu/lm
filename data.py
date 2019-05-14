@@ -185,16 +185,18 @@ class Dataset(object):
                     paras = ' \t '.join(re.split(para_delim, segment))
                     words = ['\t']+re.split(word_delim, paras)+['\t']
                     # random sampling if too long
-                    if mode == tf.estimator.ModeKeys.TRAIN:
-                        max_seq_length = mapped_schema[field_id].get('max_seq_length')
-                        if (not max_seq_length is None) and len(words) > max_seq_length:
-                            if not random_start_end.get(group_id) is None:
-                                start, end = random_start_end[group_id]
-                            else:
-                                start = random.randint(0, len(words)-max_seq_length+1)
-                                end = start+max_seq_length
-                                random_start_end[group_id] = (start, end)
-                            words = words[start:end]
+                    max_seq_length = mapped_schema[field_id].get('max_seq_length')
+                    if not max_seq_length is None:
+                        if mode == tf.estimator.ModeKeys.PREDICT:
+                            max_seq_length = None
+                    if (not max_seq_length is None) and len(words) > max_seq_length:
+                        if not random_start_end.get(group_id) is None:
+                            start, end = random_start_end[group_id]
+                        else:
+                            start = random.randint(0, len(words)-max_seq_length+1)
+                            end = start+max_seq_length
+                            random_start_end[group_id] = (start, end)
+                        words = words[start:end]
                     # tokenize
                     if mapped_schema[field_id]['limited_vocab']:
                         token_vocab = mapped_schema[field_id]['token_vocab']
