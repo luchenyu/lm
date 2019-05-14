@@ -1815,7 +1815,7 @@ class Model(object):
                         sep_ids = tf.constant(
                             [[self.char_vocab.token2id[self.char_vocab.sep]]],
                             dtype=tf.int32)
-                        sep_ids = tf.pad(sep_ids, [[0,0],[tf.shape(copy_word_ids)[-1]-1,0]])
+                        sep_ids = tf.pad(sep_ids, [[0,0],[0,tf.shape(copy_word_ids)[-1]-1]])
                         nosep_masks = tf.reduce_any(
                             tf.not_equal(
                                 copy_word_ids, tf.expand_dims(sep_ids, axis=0)),
