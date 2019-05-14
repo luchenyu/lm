@@ -1432,8 +1432,9 @@ class Model(object):
                                    speller_encoder,
                                    dropout=None,
                                    training=False)
-        word_generator = WordGenerator(speller_cell, speller_matcher, spellin_embedding,
-                                       self.char_vocab.token2id[self.char_vocab.sep])
+#         word_generator = WordGenerator(speller_cell, speller_matcher, spellin_embedding,
+#                                        self.char_vocab.token2id[self.char_vocab.sep])
+        word_generator = None
         sent_generator = SentGenerator(
             word_cell, word_matcher, global_matcher,
             word_embedder, word_generator)

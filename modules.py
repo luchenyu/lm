@@ -650,7 +650,7 @@ class WordTrainer(object):
                 get_speller_loss,
                 lambda: 0.0)
             return 0.1*speller_loss
-        self.speller_loss_fn = speller_loss_fn
+        self.speller_loss_fn = None
 
     def __call__(
         self,
@@ -674,7 +674,7 @@ class WordTrainer(object):
                 field_prior_embeds,
                 candidate_ids, candidate_embeds, target_seqs,
                 copy_word_ids, copy_embeds, copy_encodes, copy_masks,
-                extra_loss_fn=None,
+                extra_loss_fn=speller_loss_fn,
             )
 
         return loss
