@@ -307,7 +307,7 @@ def train_masked(
             (pick_encodes, None, 'context'),
             (valid_attn_encodes, None, 'encode'))
         attn_logits *= sample_attn_masks
-        attn_weights = tf.exp(tf.math.abs(attn_logits))*sample_attn_masks
+        attn_weights = tf.nn.softmax(tf.math.abs(attn_logits))*sample_attn_masks
         attn_weights /= tf.maximum(
             tf.reduce_sum(attn_weights, axis=1, keepdims=True), 1e-12)
         attn_logits *= attn_weights
@@ -323,8 +323,8 @@ def train_masked(
         # copy part
         if do_attn:
             candidate_copy_logits = matcher(
-                (valid_attn_token_embeds, None, 'latent'),
-                (candidate_token_embeds, None, 'latent'))
+                (tf.math.l2_normalize(valid_attn_token_embeds, axis=-1), None, 'latent'),
+                (tf.math.l2_normalize(candidate_token_embeds, axis=-1), None, 'latent'))
             copy_logits = tf.matmul(attn_logits, candidate_copy_logits)
             context_token_logits += copy_logits
 
@@ -410,8 +410,8 @@ def train_masked(
         # copy part
         if do_attn:
             candidate_copy_logits = matcher(
-                (valid_attn_token_embeds, None, 'latent'),
-                (valid_candidate_token_embeds, None, 'latent'))
+                (tf.math.l2_normalize(valid_attn_token_embeds, axis=-1), None, 'latent'),
+                (tf.math.l2_normalize(valid_candidate_token_embeds, axis=-1), None, 'latent'))
             copy_logits = tf.matmul(attn_logits, candidate_copy_logits)
             context_token_logits += copy_logits
 
