@@ -1003,8 +1003,8 @@ class SentGenerator(object):
             attn_word_embeds_flatten = tf.reshape(
                 attn_word_embeds, [batch_size*attn_seq_length, embed_dim])
             candidate_copy_logits = self.word_matcher(
-                (attn_word_embeds_flatten, None, 'latent'),
-                (static_word_embeds, None, 'latent'))
+                (tf.math.l2_normalize(attn_word_embeds_flatten, axis=-1), None, 'latent'),
+                (tf.math.l2_normalize(static_word_embeds, axis=-1), None, 'latent'))
             candidate_copy_logits = tf.reshape(
                 candidate_copy_logits, [batch_size, attn_seq_length, static_length])
 
@@ -1030,7 +1030,7 @@ class SentGenerator(object):
                 masks_fp = tf.cast(
                     tf.expand_dims(attn_valid_masks, axis=1), tf.float32)
                 attn_logits *= masks_fp
-                attn_weights = tf.exp(tf.math.abs(attn_logits)) * masks_fp
+                attn_weights = tf.nn.softmax(tf.math.abs(attn_logits)) * masks_fp
                 attn_weights /= tf.maximum(
                     tf.reduce_sum(attn_weights, axis=2, keepdims=True), 1e-12)
                 attn_logits *= attn_weights
@@ -1062,7 +1062,7 @@ class SentGenerator(object):
         #             )*speller_encoder.num_layers)
         #         word_ids, word_scores = self.word_generator.generate(
         #             speller_initial_state, max_word_len)
-        #         word_scores = tf.exp(word_scores)
+        #         word_scores = tf.nn.softmax(word_scores)
         #         word_embeds, word_masks = self.word_embedder(word_ids)
         #         word_masks = tf.logical_and(
         #             word_masks,
@@ -1115,8 +1115,8 @@ class SentGenerator(object):
 
             if do_attn:
                 candidate_copy_logits_copy = self.word_matcher(
-                    (attn_word_embeds, None, 'latent'),
-                    (copy_word_embeds, None, 'latent'))
+                    (tf.math.l2_normalize(attn_word_embeds, axis=-1), None, 'latent'),
+                    (tf.math.l2_normalize(copy_word_embeds, axis=-1), None, 'latent'))
 
             def candidates_fn(encodes):
                 encode_dim = encodes.get_shape()[-1].value
@@ -1167,7 +1167,7 @@ class SentGenerator(object):
                     masks_fp = tf.cast(
                         tf.expand_dims(attn_valid_masks, axis=1), tf.float32)
                     attn_logits *= masks_fp
-                    attn_weights = tf.exp(tf.math.abs(attn_logits)) * masks_fp
+                    attn_weights = tf.nn.softmax(tf.math.abs(attn_logits)) * masks_fp
                     attn_weights /= tf.maximum(
                         tf.reduce_sum(attn_weights, axis=2, keepdims=True), 1e-12)
                     attn_logits *= attn_weights
@@ -1298,7 +1298,7 @@ class ClassGenerator(object):
                     masks_fp = tf.cast(
                         tf.expand_dims(attn_valid_masks, axis=1), tf.float32)
                     attn_logits *= masks_fp
-                    attn_weights = tf.exp(tf.math.abs(attn_logits)) * masks_fp
+                    attn_weights = tf.nn.softmax(tf.math.abs(attn_logits)) * masks_fp
                     attn_weights /= tf.maximum(
                         tf.reduce_sum(attn_weights, axis=2, keepdims=True), 1e-12)
                     attn_logits *= attn_weights
@@ -1325,7 +1325,7 @@ class ClassGenerator(object):
         #             )*speller_encoder.num_layers)
         #         word_ids, word_scores = self.word_generator.generate(
         #             speller_initial_state, max_word_len)
-        #         word_scores = tf.exp(word_scores)
+        #         word_scores = tf.nn.softmax(word_scores)
         #         word_embeds, word_masks = self.word_embedder(word_ids)
         #         word_masks = tf.logical_and(
         #             word_masks,
@@ -1390,7 +1390,7 @@ class ClassGenerator(object):
                     masks_fp = tf.cast(
                         tf.expand_dims(attn_valid_masks, axis=1), tf.float32)
                     attn_logits *= masks_fp
-                    attn_weights = tf.exp(tf.math.abs(attn_logits)) * masks_fp
+                    attn_weights = tf.nn.softmax(tf.math.abs(attn_logits)) * masks_fp
                     attn_weights /= tf.maximum(
                         tf.reduce_sum(attn_weights, axis=2, keepdims=True), 1e-12)
                     attn_logits *= attn_weights
