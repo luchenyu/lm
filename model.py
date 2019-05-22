@@ -702,13 +702,7 @@ class Model(object):
                         field_query_embedding=field_query_embeds,
                         field_key_embedding=field_key_embeds,
                         field_value_embedding=field_value_embeds,
-                        dec_masks=tf.zeros([batch_size, 0], dtype=tf.bool),
-                        dec_keys=(
-                            tf.zeros([batch_size, 0, layer_size]),
-                        )*num_layers,
-                        dec_values=(
-                            tf.zeros([batch_size, 0, layer_size]),
-                        )*num_layers,
+                        dec_tfstruct=None,
                         enc_tfstruct=extra_tfstruct,
                     )
                     target_loss, _ = sent_trainer(
@@ -1335,13 +1329,7 @@ class Model(object):
                         field_query_embedding=field_query_embeds,
                         field_key_embedding=field_key_embeds,
                         field_value_embedding=field_value_embeds,
-                        dec_masks=tf.zeros([batch_size, 0], dtype=tf.bool),
-                        dec_keys=(
-                            tf.zeros([batch_size, 0, layer_size]),
-                        )*num_layers,
-                        dec_values=(
-                            tf.zeros([batch_size, 0, layer_size]),
-                        )*num_layers,
+                        dec_tfstruct=None,
                         enc_tfstruct=extra_tfstruct,
                     )
                     loss, accuracy = sent_trainer(
@@ -1848,13 +1836,7 @@ class Model(object):
                                     [batch_size, 1]),
                                 num_layers,
                                 axis=-1)),
-                            dec_masks=tf.zeros([batch_size, 0], dtype=tf.bool),
-                            dec_keys=(
-                                tf.zeros([batch_size, 0, layer_size]),
-                            )*num_layers,
-                            dec_values=(
-                                tf.zeros([batch_size, 0, layer_size]),
-                            )*num_layers,
+                            dec_tfstruct=null_tfstruct,
                             enc_tfstruct=extra_tfstruct,
                         )
                         if limited_vocab:
