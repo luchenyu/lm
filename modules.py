@@ -723,7 +723,7 @@ class SentTrainer(object):
 
 """Generator"""
 
-def concat_candidates(encodes, candidates_fn_list):
+def concat_candidates(*args, candidates_fn_list):
     """
     concat candidates return by candidates_fn_list
     args:
@@ -739,7 +739,7 @@ def concat_candidates(encodes, candidates_fn_list):
     for candidates_fn in candidates_fn_list:
 
         candidate_embeds, candidate_ids, candidate_masks, logits \
-            = candidates_fn(encodes)
+            = candidates_fn(*args)
 
         if candidate_masks is None:
             candidate_masks = tf.ones_like(logits, dtype=tf.bool)
@@ -809,7 +809,7 @@ def generate_seq(
         seqs: batch_size x num_candidates x length [x word_len]
         scores: batch_size x num_candidates
     """
-    candidates_callback = lambda encodes: concat_candidates(encodes, candidates_fn_list)
+    candidates_callback = lambda *args: concat_candidates(*args, candidates_fn_list=candidates_fn_list)
 
     seqs, scores = decoder(
         length, initial_state, state_si_fn, cell, candidates_callback, start_embedding, start_id,
@@ -868,7 +868,7 @@ class WordGenerator(object):
 
         self.speller_cell.cache_encodes(initial_state.word_encodes)
 
-        def candidates_fn(encodes):
+        def candidates_fn(encodes, state):
             context_token_logits = self.speller_matcher(
                 (encodes, None, 'context'),
                 (self.nosep_embedding, None, 'embed'))
@@ -973,7 +973,7 @@ class SentGenerator(object):
             (field_prior_embeds, None, 'latent'),
             (word_embedding, None, 'embed'))
         extra_logits = sample_token_logits + token_prior_logits
-        def candidates_fn(encodes):
+        def candidates_fn(encodes, state):
             encode_dim = encodes.get_shape()[-1].value
             encodes_reshaped = tf.reshape(
                 encodes, [batch_size, -1, encode_dim])
@@ -993,7 +993,7 @@ class SentGenerator(object):
 
         # dynamic gen
         if not gen_word_len is None:
-            def candidates_fn(encodes):
+            def candidates_fn(encodes, state):
                 encode_dim = encodes.get_shape()[-1].value
                 batch_beam_size = tf.shape(encodes)[0]
                 encodes_reshaped = tf.reshape(
@@ -1065,7 +1065,7 @@ class SentGenerator(object):
             token_prior_logits_copy = tf.reshape(
                 token_prior_logits_copy, [batch_size, 1, num_copies])
             extra_logits_copy = sample_token_logits_copy + token_prior_logits_copy
-            def candidates_fn(encodes):
+            def candidates_fn(encodes, state):
                 encode_dim = encodes.get_shape()[-1].value
                 encodes_reshaped = tf.reshape(
                     encodes, [batch_size, -1, encode_dim])

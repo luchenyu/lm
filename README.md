@@ -2,18 +2,18 @@
 # Universal LM Model
 
 ## Guidelines
-1. Data is some kind of structure comprised of multiple "pieces" of different types and meaning.
-2. Different "pieces" of one sample have inter-relationships with each other.
-3. Task is about filling in the blank of different "pieces" of data.
-4. There is no fundamental difference between "generation", "classification", "labeling", etc.
-5. One universal model that can properly handle different types of "pieces" shall be able to solve any task.
-6. Most part of the model should be task-independent and shared across tasks, and task-related parameters should be minimized.
-7. Model should has zero-shot and few-shot learning ability, and survive from catastrophic forgetting when trained sequentially with different tasks.
-7. For NLP tasks, the tokenize startegy should be flexible.
-8. The model should be able to learn globally normalized matching score of context and token, instead of marginalized ones.
+* Data is some kind of structure comprised of multiple "pieces" of different types and meaning.
+* Different "pieces" of one sample have inter-relationships with each other.
+* Task is about filling in the blank of different "pieces" of data.
+* There is no fundamental difference between "generation", "classification", "labeling", etc.
+* One universal model that can properly handle different types of "pieces" shall be able to solve any task.
+* Most part of the model shall be task-independent and shared across tasks, while task-related parameters shall be minimized.
+* Model shall have zero-shot and few-shot learning ability, and survive from catastrophic forgetting when trained sequentially with different tasks.
+* For NLP tasks, the tokenize startegy shall be flexible.
+* The model shall be able to learn globally normalized matching score of context and token, instead of marginalized ones.
 
-## Design
-1. data_config
+## Design Specs
+* data_config
 ```python
 {
     'segment_delim': str,
@@ -37,7 +37,7 @@
     ],
 }
 ```
-2. model_config
+* model_config
 ```python
 {
     'char_embed_dim': int,
@@ -46,7 +46,7 @@
     'num_heads': int,
 }
 ```
-3. task_config
+* task_config
 ```python
 {
     'task_spec': [
@@ -60,7 +60,7 @@
     ],
 }
 ```
-4. run_config
+* run_config
 ```python
 {
     'task_config_name': str,
@@ -84,7 +84,7 @@
     },
 }
 ```
-5. TransformerStruct
+* TransformerStruct
 ```python
 {
     'field_query_embeds': tuple(batch_size x length x layer_size) * num_layers,
@@ -101,19 +101,21 @@
 ```
 
 ## Features
-1. Model is word-based yet the basic unit is character. Model support flexible tokenization strategy. You can either limit the tokens(words) by feed a token vocab or go wild with unlimited vocabs.
-2. Model has a speller module to generate tokens if no token vocab is provided.
-3. Use transformer as encoder, each slot is defined by its field, position, and token.
-4. Field embeds have control on the attention part. When model is freezed, we only train the field embeds.
-5. Matcher takes the token embeds and token encodes of candidates to match, the later is for copy-mechanism.
-6. Cross entropy training is performed globally, instead of sample-wise. So the logits can be directly used in beam decoding.
-7. Dataset is independent of Task, one dataset can be mapped to multiple tasks.
+* Model is word-based yet the basic unit is character. Model support flexible tokenization strategy. You can either limit the tokens(words) by feed a token vocab or go wild with unlimited vocabs.
+* Model has a speller module to generate tokens if no token vocab is provided. (removed for speed)
+* Use transformer as encoder, each slot is defined by its field, position, and token.
+* Field embeds have control on the attention part. When model is freezed, we only train the field embeds.
+* Matcher takes the token embeds and token encodes of candidates to match, the later is for copy-mechanism.
+* Cross entropy training is performed globally, instead of sample-wise. So the logits can be directly used in beam decoding.
+* Dataset is independent of Task, one dataset can be mapped to multiple tasks.
+* Capable of multi-step generation/prediction, by setting target_level properly.
 
 ## TODOs
-1. support combine multiple dataset for same task
-2. support multi-task training
-3. try novel decoding, not from left to right
-4. try better word embedder, maybe some clustering mechanism
-5. learn word segmentation on the fly and optimize segmentor together
-6. add support for more type of data, e.g. image and speech
-7. explorer rl-based generation strategy, for data with many fields
+* Add support for combining multiple dataset of same task.
+* Add support for multi-task training.
+* Try novel decoding, not from left to right.
+* Try better word embedder, maybe some clustering mechanism.
+* Learn word segmentation on the fly and optimize segmentor together, unsupervisely if possible.
+* Add support for more type of data, e.g. image and speech.
+* Explorer rl-based generation strategy, for data with many fields.
+* Automate the whole pipeline.
