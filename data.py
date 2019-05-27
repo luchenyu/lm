@@ -125,51 +125,10 @@ class Dataset(object):
             })
         return mapped_index, mapped_schema
 
-    def file_input_fn(self, filename,
-                      mapped_index, mapped_schema,
-                      batch_size, mode):
+    def get_process_fn(self, mapped_index, mapped_schema, mode):
         """
-        An input function for training
-        each line is an example
-        each example contains one or more features separated by segment_delim ('***|||***')
-        each feature contains one or more paragraphs separated by '\t'
-        each paragraph contains one or more words separated by ' '
-        args:
-            filename: name of data file or folder
-            mapped_index: [ ## list by feature_id
-                {
-                    'field_id': int,
-                    'item_id': int,
-                    'segment_id': int,
-                },
-            ],
-            'mapped_schema': [ ## list by field_id
-                {
-                    'type': 'sequence'|'class',
-                    'limited_vocab': bool,
-                    'token_vocab': None|path,
-                    'max_token_length': int,
-                    'min_seq_length': int,
-                    'max_seq_length': int,
-                    'group_id': int,
-                },
-            ],
-            batch_size: int
-            mode: ModeKeys
+        process input data
         """
-        data_path = os.path.join(self.path, filename)
-        if os.path.isdir(data_path):
-            filenames = [os.path.join(data_path, filename) for filename in os.listdir(data_path)]
-            random.shuffle(filenames)
-        else:
-            filenames = [data_path]
-        dataset = tf.data.TextLineDataset(filenames)
-
-        if mode == tf.estimator.ModeKeys.TRAIN:
-            dataset = dataset.repeat()
-            shuffle_pool = max(100000, len(list(open(filenames[0], 'r'))))
-            dataset = dataset.shuffle(buffer_size=shuffle_pool)
-
         para_delim = re.compile(r'[ \t]*\t[ \t]*')
         word_delim = re.compile(r' +')
         def _featurize(text):
@@ -227,42 +186,114 @@ class Dataset(object):
                  for i, item in enumerate(mapped_index)], [])
             return features
 
+        num_features = len(mapped_index)
+        def process_fn(text):
+            features = tf.py_function(
+                _featurize, [text], [tf.int32, tf.float32]*num_features)
+            features = [tf.reshape(item, [-1]) for item in features]
+            return features
+
+        return process_fn
+
+    def file_input_fn(self, filename,
+                      mapped_index, mapped_schema,
+                      batch_size, mode):
+        """
+        An input function for training
+        each line is an example
+        each example contains one or more features separated by segment_delim ('***|||***')
+        each feature contains one or more paragraphs separated by '\t'
+        each paragraph contains one or more words separated by ' '
+        args:
+            filename: name of data file or folder
+            mapped_index: [ ## list by feature_id
+                {
+                    'field_id': int,
+                    'item_id': int,
+                    'segment_id': int,
+                },
+            ],
+            'mapped_schema': [ ## list by field_id
+                {
+                    'type': 'sequence'|'class',
+                    'limited_vocab': bool,
+                    'token_vocab': None|path,
+                    'max_token_length': int,
+                    'min_seq_length': int,
+                    'max_seq_length': int,
+                    'group_id': int,
+                },
+            ],
+            batch_size: int
+            mode: ModeKeys
+        """
+        data_path = os.path.join(self.path, filename)
+        if os.path.isdir(data_path):
+            filenames = [os.path.join(data_path, filename) for filename in os.listdir(data_path)]
+            random.shuffle(filenames)
+        else:
+            filenames = [data_path]
+        dataset = tf.data.TextLineDataset(filenames)
+
+        if mode == tf.estimator.ModeKeys.TRAIN:
+            dataset = dataset.repeat()
+            shuffle_pool = max(100000, len(list(open(filenames[0], 'r'))))
+            dataset = dataset.shuffle(buffer_size=shuffle_pool)
+
         def _format(features):
             seqs_list = features[::2]
             segs_list = features[1::2]
             features = {}
             for i, (seqs, segs) in enumerate(zip(seqs_list, segs_list)):
-                features[i] = {'seqs': seqs, 'segs': segs}
+                features[str(i)+'-seqs'] = seqs
+                features[str(i)+'-segs'] = segs
             return features, tf.zeros([]) # (features, labels)
-        
+
         def _filter(features, labels):
             valids = []
-            for i, feature in features.items():
+            for i in range(len(mapped_index)):
                 field_id = mapped_index[i]['field_id']
                 min_seq_length = mapped_schema[field_id].get('min_seq_length')
                 if not min_seq_length is None:
                     valids.append(tf.logical_or(
-                        tf.equal(tf.shape(feature['seqs'])[0], 0),
-                        tf.greater(tf.reduce_sum(feature['segs']), min_seq_length+2)))
+                        tf.equal(tf.shape(features[str(i)+'-seqs'])[0], 0),
+                        tf.greater(tf.reduce_sum(features[str(i)+'-segs']), min_seq_length+2)))
             if len(valids) > 0:
                 return tf.reduce_all(tf.stack(valids))
             else:
                 return True
 
-        num_features = len(mapped_index)
+        process_fn = self.get_process_fn(mapped_index, mapped_schema, mode)
         dataset = dataset.map(
-            lambda text: _format(tf.py_function(_featurize, [text], [tf.int32, tf.float32]*num_features)),
+            lambda text: _format(process_fn(text)),
             num_parallel_calls=tf.data.experimental.AUTOTUNE)
         dataset = dataset.filter(_filter)
 
+        num_features = len(mapped_index)
         padded_shapes = {}
         for i in range(num_features):
-            padded_shapes[i] = {'seqs': [None], 'segs': [None]}
+            padded_shapes[str(i)+'-seqs'] = [None]
+            padded_shapes[str(i)+'-segs'] = [None]
         padded_shapes = (padded_shapes, [])
         dataset = dataset.padded_batch(batch_size, padded_shapes=padded_shapes)
         dataset = dataset.prefetch(buffer_size=tf.data.experimental.AUTOTUNE)
 
         return dataset
+
+    def serving_input_fn(self, mapped_index, mapped_schema):
+        """
+        input fn for serving
+        """
+        receiver_tensors = {}
+        for i in range(len(mapped_index)):
+            receiver_tensors[str(i)+'-seqs'] = tf.placeholder(
+                dtype=tf.int32, shape=[None, None])
+            receiver_tensors[str(i)+'-segs'] = tf.placeholder(
+                dtype=tf.float32, shape=[None, None])
+        features = {}
+        for key in receiver_tensors:
+            features[key] = tf.identity(receiver_tensors[key])
+        return tf.estimator.export.ServingInputReceiver(features, receiver_tensors)
 
     def textify(self, field_id, seqs, segs):
         """

@@ -157,7 +157,7 @@ def predict(
     field_mapping,
     hyper_params):
     """
-    train the model and evaluate every eval_every steps
+    use trained model to do prediction on test samples
     """
 
     config=tf.estimator.RunConfig(
@@ -208,3 +208,35 @@ def predict(
                 text = dataset.textify(source_field_id, seqs, segs)
                 text_list.append(text)
             fwrite.write(dataset.data_config['segment_delim'].join(text_list)+'\n')
+
+def export(
+    dataset,
+    model,
+    field_mapping,
+    hyper_params):
+    """
+    export saved model
+    """
+
+    config=tf.estimator.RunConfig(
+        log_step_count_steps=1000)
+
+    mapped_index, mapped_schema = dataset.task_mapping(
+        field_mapping, model.task_config['task_spec'])
+    params = {
+        'data_index': mapped_index,
+        'data_schema': mapped_schema,
+        'hyper_params': hyper_params,
+    }
+
+    # build estimator
+    lm = tf.estimator.Estimator(
+        model_fn=model.model_fn,
+        model_dir=model.train_dir,
+        params=params,
+        config=config,
+        warm_start_from=model.warm_start_from)
+
+    # perform the export
+    lm.export_savedmodel(
+        model.train_dir, lambda: dataset.serving_input_fn(mapped_index, mapped_schema), strip_default_attrs=True)

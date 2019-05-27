@@ -318,18 +318,20 @@ class Model(object):
             word_trainer,
             training=True)
 
-        batch_size = tf.shape(features[0]['seqs'])[0]
+        batch_size = tf.shape(features['0-seqs'])[0]
 
-        for i, feature in features.items():
+        for i in range(len(data_index)):
 
+            feature = {}
+            features[i] = feature
             field_id = data_index[i]['field_id']
             feature_type = data_schema[field_id]['type']
             limited_vocab = data_schema[field_id]['limited_vocab']
             token_vocab = data_schema[field_id].get('token_vocab')
             max_token_length = data_schema[field_id].get('max_token_length')
             target_level = task_spec[field_id]['target_level']
-            seqs = feature['seqs']
-            segs = feature['segs']
+            seqs = features[str(i)+'-seqs']
+            segs = features[str(i)+'-segs']
 
             # segment
             if not token_vocab is None:
@@ -483,7 +485,6 @@ class Model(object):
                 values=None,
                 encodes=None,
             )
-#             feature['masked_tfstruct'] = feature['tfstruct']
 
         # add extra sample-level tfstruct
         global_tfstruct = model_utils_py3.TransformerStruct(
@@ -516,7 +517,7 @@ class Model(object):
 
         # loop for target levels < max_target_level
         tfstruct_list, feature_id_list = [], []
-        for i in features:
+        for i in range(len(data_index)):
             target_level = task_spec[data_index[i]['field_id']]['target_level']
             if target_level < max_target_level or target_level == 0:
                 feature_id_list.append(i)
@@ -564,8 +565,9 @@ class Model(object):
         # get the loss of each feature
         regulation_losses = {}
         target_losses = {}
-        for i, feature in features.items():
+        for i in range(len(data_index)):
 
+            feature = features[i]
             field_id = data_index[i]['field_id']
             item_id = data_index[i]['item_id']
             group_id = data_schema[field_id]['group_id']
@@ -576,7 +578,7 @@ class Model(object):
             token_embeds = data_schema[field_id].get('token_embeds')
             candidate_ids = data_schema[field_id].get('candidate_ids')
             candidate_embeds = data_schema[field_id].get('candidate_embeds')
-            target_seqs = None if candidate_ids is None else feature['seqs']-1
+            target_seqs = None if candidate_ids is None else features[str(i)+'-seqs']-1
             max_token_length = data_schema[field_id].get('max_token_length')
             target_level = task_spec[field_id]['target_level']
             copy_from = task_spec[field_id].get('copy_from')
@@ -596,7 +598,7 @@ class Model(object):
             = [], [], [], []
             candidate_word_ids, candidate_word_embeds, candidate_valid_masks \
             = [], [], []
-            for j in features:
+            for j in range(len(data_index)):
                 field_id_j = data_index[j]['field_id']
                 item_id_j = data_index[j]['item_id']
                 group_id_j = data_schema[field_id_j]['group_id']
@@ -681,7 +683,7 @@ class Model(object):
             # target loss
             if target_level > 0:
                 extra_tfstruct_list, extra_feature_id_list = [], []
-                for j in features:
+                for j in range(len(data_index)):
                     field_id_j = data_index[j]['field_id']
                     item_id_j = data_index[j]['item_id']
                     group_id_j = data_schema[field_id_j]['group_id']
@@ -938,18 +940,20 @@ class Model(object):
             word_trainer,
             training=False)
 
-        batch_size = tf.shape(features[0]['seqs'])[0]
+        batch_size = tf.shape(features['0-seqs'])[0]
 
-        for i, feature in features.items():
+        for i in range(len(data_index)):
 
+            feature = {}
+            features[i] = feature
             field_id = data_index[i]['field_id']
             feature_type = data_schema[field_id]['type']
             limited_vocab = data_schema[field_id]['limited_vocab']
             token_vocab = data_schema[field_id].get('token_vocab')
             max_token_length = data_schema[field_id].get('max_token_length')
             target_level = task_spec[field_id]['target_level']
-            seqs = feature['seqs']
-            segs = feature['segs']
+            seqs = features[str(i)+'-seqs']
+            segs = features[str(i)+'-segs']
 
             # segment
             if not token_vocab is None:
@@ -1128,7 +1132,7 @@ class Model(object):
 
         # loop for target levels < max_target_level
         tfstruct_list, feature_id_list = [], []
-        for i in features:
+        for i in range(len(data_index)):
             target_level = task_spec[data_index[i]['field_id']]['target_level']
             if target_level < max_target_level or target_level == 0:
                 feature_id_list.append(i)
@@ -1182,8 +1186,9 @@ class Model(object):
         # get the loss of each feature
         metrics = {}
         losses = {}
-        for i, feature in features.items():
+        for i in range(len(data_index)):
 
+            feature = features[i]
             field_id = data_index[i]['field_id']
             item_id = data_index[i]['item_id']
             group_id = data_schema[field_id]['group_id']
@@ -1194,7 +1199,7 @@ class Model(object):
             token_embeds = data_schema[field_id].get('token_embeds')
             candidate_ids = data_schema[field_id].get('candidate_ids')
             candidate_embeds = data_schema[field_id].get('candidate_embeds')
-            target_seqs = None if candidate_ids is None else feature['seqs']-1
+            target_seqs = None if candidate_ids is None else features[str(i)+'-seqs']-1
             max_token_length = data_schema[field_id].get('max_token_length')
             target_level = task_spec[field_id]['target_level']
             copy_from = task_spec[field_id].get('copy_from')
@@ -1217,7 +1222,7 @@ class Model(object):
             = [], [], [], []
             candidate_word_ids, candidate_word_embeds, candidate_valid_masks \
             = [], [], []
-            for j in features:
+            for j in range(len(data_index)):
                 field_id_j = data_index[j]['field_id']
                 item_id_j = data_index[j]['item_id']
                 group_id_j = data_schema[field_id_j]['group_id']
@@ -1308,7 +1313,7 @@ class Model(object):
             # target loss
             if target_level > 0:
                 extra_tfstruct_list, extra_feature_id_list = [], []
-                for j in features:
+                for j in range(len(data_index)):
                     field_id_j = data_index[j]['field_id']
                     item_id_j = data_index[j]['item_id']
                     group_id_j = data_schema[field_id_j]['group_id']
@@ -1516,11 +1521,13 @@ class Model(object):
             word_encoder, word_matcher, global_matcher,
             word_embedder, word_generator)
 
-        batch_size = tf.shape(features[0]['seqs'])[0]
+        batch_size = tf.shape(features['0-seqs'])[0]
         max_target_level = max([item['target_level'] for item in task_spec])
 
-        for i, feature in features.items():
+        for i in range(len(data_index)):
 
+            feature = {}
+            features[i] = feature
             field_id = data_index[i]['field_id']
             feature_type = data_schema[field_id]['type']
             limited_vocab = data_schema[field_id]['limited_vocab']
@@ -1528,8 +1535,8 @@ class Model(object):
             max_token_length = data_schema[field_id].get('max_token_length')
             max_seq_length = data_schema[field_id].get('max_seq_length')
             target_level = task_spec[field_id]['target_level']
-            seqs = feature['seqs']
-            segs = feature['segs']
+            seqs = features[str(i)+'-seqs']
+            segs = features[str(i)+'-segs']
 
             # segment
             if not token_vocab is None:
@@ -1668,7 +1675,7 @@ class Model(object):
 
         # loop for non targets
         tfstruct_list, feature_id_list = [], []
-        for i in features:
+        for i in range(len(data_index)):
             if task_spec[data_index[i]['field_id']]['target_level'] == 0:
                 feature_id_list.append(i)
                 tfstruct_list.append(features[i]['tfstruct'])
@@ -1709,12 +1716,14 @@ class Model(object):
 
         # loop for target_level
         predictions = {}
+        export_outputs = {}
         start_level = 1 if max_target_level > 0 else 0
         for tlevel in range(start_level, max_target_level+1):
 
             # generate one-by-one
-            for i, feature in features.items():
+            for i in range(len(data_index)):
 
+                feature = features[i]
                 field_id = data_index[i]['field_id']
                 item_id = data_index[i]['item_id']
                 group_id = data_schema[field_id]['group_id']
@@ -1741,7 +1750,7 @@ class Model(object):
                     = [], [], [], []
                     copy_word_ids, copy_word_embeds, copy_valid_masks \
                     = [], [], []
-                    for j in features:
+                    for j in range(len(data_index)):
                         field_id_j = data_index[j]['field_id']
                         item_id_j = data_index[j]['item_id']
                         group_id_j = data_schema[field_id_j]['group_id']
@@ -1860,10 +1869,10 @@ class Model(object):
                                 copy_word_ids=copy_word_ids, copy_word_embeds=copy_word_embeds,
                                 copy_valid_masks=copy_valid_masks,
                                 min_length=min_seq_length)
-                            feature['seqs'] = seqs[:,0]
-                            feature['segs'] = tf.zeros([batch_size, 0])
+                            features[str(i)+'-seqs'] = seqs[:,0]
+                            features[str(i)+'-segs'] = tf.zeros([batch_size, 0])
                             feature['segmented_seqs'] = tf.gather(
-                                token_ids, feature['seqs'])
+                                token_ids, features[str(i)+'-seqs'])
                         else:
                             if candidate_embeds is None:
                                 sep_ids = tf.constant(
@@ -1926,10 +1935,10 @@ class Model(object):
                                     copy_valid_masks=copy_valid_masks,
                                     min_length=min_seq_length)
                             feature['segmented_seqs'] = seqs[:,0]
-                            feature['seqs'], feature['segs'] = model_utils_py3.stitch_chars(
+                            features[str(i)+'-seqs'], features[str(i)+'-segs'] = model_utils_py3.stitch_chars(
                                 feature['segmented_seqs'])
-                            feature['segs'] = tf.pad(
-                                feature['segs'], [[0,0],[1,1]], constant_values=1.0)
+                            features[str(i)+'-segs'] = tf.pad(
+                                features[str(i)+'-segs'], [[0,0],[1,1]], constant_values=1.0)
                     elif feature_type == 'class':
                         tfstruct = model_utils_py3.TransformerStruct(
                             field_query_embeds=tuple(tf.split(
@@ -1974,10 +1983,10 @@ class Model(object):
                                 static_word_priors=word_priors,
                                 copy_word_ids=copy_word_ids, copy_word_embeds=copy_word_embeds,
                                 copy_valid_masks=copy_valid_masks)
-                            feature['seqs'] = classes[:,0]
-                            feature['segs'] = tf.zeros([batch_size, 0])
+                            features[str(i)+'-seqs'] = classes[:,0]
+                            features[str(i)+'-segs'] = tf.zeros([batch_size, 0])
                             feature['segmented_seqs'] = tf.gather(
-                                token_ids, feature['seqs'])
+                                token_ids, features[str(i)+'-seqs'])
                         else:
                             if candidate_embeds is None:
                                 classes, scores = class_generator.generate(
@@ -2008,21 +2017,25 @@ class Model(object):
                                     copy_word_ids=copy_word_ids, copy_word_embeds=copy_word_embeds,
                                     copy_valid_masks=copy_valid_masks)
                             feature['segmented_seqs'] = seqs[:,0]
-                            feature['seqs'], feature['segs'] = model_utils_py3.stitch_chars(
+                            features[str(i)+'-seqs'], features[str(i)+'-segs'] = model_utils_py3.stitch_chars(
                                 feature['segmented_seqs'])
-                            feature['segs'] = tf.pad(
-                                feature['segs'], [[0,0],[1,1]], constant_values=1.0)
+                            features[str(i)+'-segs'] = tf.pad(
+                                features[str(i)+'-segs'], [[0,0],[1,1]], constant_values=1.0)
 
                     # add to predictions
-                    predictions[str(i)+'-seqs'] = feature['seqs']
-                    predictions[str(i)+'-segs'] = feature['segs']
+                    predictions[str(i)+'-seqs'] = features[str(i)+'-seqs']
+                    predictions[str(i)+'-segs'] = features[str(i)+'-segs']
+
+                    # add to exports
+                    export_outputs[str(i)] = tf.estimator.export.PredictOutput(
+                        {'seqs':features[str(i)+'-seqs'], 'segs':features[str(i)+'-segs']})
 
                     if tlevel < max_target_level:
                         # embed words
                         if limited_vocab:
                             word_embeds = tf.gather(
-                                token_embeds, feature['seqs'])
-                            word_masks = tf.greater(feature['seqs'], 0)
+                                token_embeds, features[str(i)+'-seqs'])
+                            word_masks = tf.greater(features[str(i)+'-seqs'], 0)
                         else:
                             word_embeds, word_masks = word_embedder(
                                 feature['segmented_seqs'])
@@ -2086,4 +2099,5 @@ class Model(object):
         tf.logging.info('total number of parameters is: {}'.format(total_params))
 
         # return EstimatorSpec
-        return tf.estimator.EstimatorSpec(tf.estimator.ModeKeys.PREDICT, predictions=predictions)
+        return tf.estimator.EstimatorSpec(
+            tf.estimator.ModeKeys.PREDICT, predictions=predictions, export_outputs=export_outputs)
