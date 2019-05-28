@@ -32,6 +32,8 @@ class Dataset(object):
         self.path = path
         self.char_vocab = char_vocab
         self.data_config = self.parse_data_config(path, char_vocab)
+        self.para_delim = re.compile(r'[ \t]*\t[ \t]*')
+        self.word_delim = re.compile(r' +')
 
     def parse_data_config(self, path, char_vocab):
         """parse a dataset"""
@@ -125,75 +127,52 @@ class Dataset(object):
             })
         return mapped_index, mapped_schema
 
-    def get_process_fn(self, mapped_index, mapped_schema, mode):
-        """
-        process input data
-        """
-        para_delim = re.compile(r'[ \t]*\t[ \t]*')
-        word_delim = re.compile(r' +')
-        def _featurize(text):
-            text = text.numpy().decode('utf-8').strip()
-            segments = text.split(self.data_config['segment_delim'])
-            random_start_end = {}
-            def _tokenize(field_id, segment, group_id):
-                segment = segment.strip()
-                if segment == '':
-                    seqs = []
-                    segs = []
-                elif mapped_schema[field_id]['type'] == 'sequence':
-                    paras = ' \t '.join(re.split(para_delim, segment))
-                    words = ['\t']+re.split(word_delim, paras)+['\t']
-                    # random sampling if too long
-                    max_seq_length = mapped_schema[field_id].get('max_seq_length')
-                    if not max_seq_length is None:
-                        if mode == tf.estimator.ModeKeys.PREDICT:
-                            max_seq_length = None
-                    if (not max_seq_length is None) and len(words) > max_seq_length:
-                        if not random_start_end.get(group_id) is None:
-                            start, end = random_start_end[group_id]
-                        else:
-                            start = random.randint(0, len(words)-max_seq_length+1)
-                            end = start+max_seq_length
-                            random_start_end[group_id] = (start, end)
-                        words = words[start:end]
-                    # tokenize
-                    if mapped_schema[field_id]['limited_vocab']:
-                        token_vocab = mapped_schema[field_id]['token_vocab']
-                        seqs = data_utils_py3.tokens_to_seqs(words, token_vocab)
-                        segs = [1.0,]*(len(seqs)+1)
-                    else:
-                        seqs, segs = data_utils_py3.tokens_to_seqs_segs(
-                            words, self.char_vocab)
-                elif mapped_schema[field_id]['type'] == 'class':
-                    # tokenize
-                    tokens = [segment]
-                    if mapped_schema[field_id]['limited_vocab']:
-                        token_vocab = mapped_schema[field_id]['token_vocab']
-                        seqs = data_utils_py3.tokens_to_seqs(tokens, token_vocab)
-                        segs = []
-                    else:
-                        seqs, segs = data_utils_py3.tokens_to_seqs_segs(
-                            tokens, self.char_vocab)
+    def tokenize(self, feature_id, segment, random_start_end, mapped_index, mapped_schema, mode):
+        field_id = mapped_index[feature_id]['field_id']
+        item_id = mapped_index[feature_id]['item_id']
+        group_id = mapped_schema[field_id]['group_id']
+        segment = segment.strip()
+        if segment == '':
+            seqs = []
+            segs = []
+        elif mapped_schema[field_id]['type'] == 'sequence':
+            paras = ' \t '.join(re.split(self.para_delim, segment))
+            words = ['\t']+re.split(self.word_delim, paras)+['\t']
+            # random sampling if too long
+            max_seq_length = mapped_schema[field_id].get('max_seq_length')
+            if mode == tf.estimator.ModeKeys.PREDICT:
+                max_seq_length = None
+            if (not max_seq_length is None) and len(words) > max_seq_length:
+                if not random_start_end.get(str(group_id)+'-'+str(item_id)) is None:
+                    start, end = random_start_end[str(group_id)+'-'+str(item_id)]
                 else:
-                    raise NameError('wrong data type!')
-                seqs = np.array(seqs, dtype=np.int32)
-                segs = np.array(segs, dtype=np.float32)
-                return [seqs, segs]
-            features = sum(
-                [_tokenize(item['field_id'], segments[item['segment_id']], mapped_schema[i]['group_id'])
-                 if not item['segment_id'] is None else
-                 _tokenize(item['field_id'], '', mapped_schema[i]['group_id'])
-                 for i, item in enumerate(mapped_index)], [])
-            return features
-
-        num_features = len(mapped_index)
-        def process_fn(text):
-            features = tf.py_function(
-                _featurize, [text], [tf.int32, tf.float32]*num_features)
-            features = [tf.reshape(item, [-1]) for item in features]
-            return features
-
-        return process_fn
+                    start = random.randint(0, len(words)-max_seq_length+1)
+                    end = start+max_seq_length
+                    random_start_end[str(group_id)+'-'+str(item_id)] = (start, end)
+                words = words[start:end]
+            # tokenize
+            if mapped_schema[field_id]['limited_vocab']:
+                token_vocab = mapped_schema[field_id]['token_vocab']
+                seqs = data_utils_py3.tokens_to_seqs(words, token_vocab)
+                segs = [1.0,]*(len(seqs)+1)
+            else:
+                seqs, segs = data_utils_py3.tokens_to_seqs_segs(
+                    words, self.char_vocab)
+        elif mapped_schema[field_id]['type'] == 'class':
+            # tokenize
+            tokens = [segment]
+            if mapped_schema[field_id]['limited_vocab']:
+                token_vocab = mapped_schema[field_id]['token_vocab']
+                seqs = data_utils_py3.tokens_to_seqs(tokens, token_vocab)
+                segs = []
+            else:
+                seqs, segs = data_utils_py3.tokens_to_seqs_segs(
+                    tokens, self.char_vocab)
+        else:
+            raise NameError('wrong data type!')
+        seqs = np.array(seqs, dtype=np.int32)
+        segs = np.array(segs, dtype=np.float32)
+        return [seqs, segs]
 
     def file_input_fn(self, filename,
                       mapped_index, mapped_schema,
@@ -240,6 +219,19 @@ class Dataset(object):
             shuffle_pool = max(100000, len(list(open(filenames[0], 'r'))))
             dataset = dataset.shuffle(buffer_size=shuffle_pool)
 
+        def _featurize(text):
+            text = text.numpy().decode('utf-8').strip()
+            segments = text.split(self.data_config['segment_delim'])
+            random_start_end = {}
+            features = sum([
+                self.tokenize(
+                    i, segments[item['segment_id']], random_start_end, mapped_index, mapped_schema, mode)
+                if not item['segment_id'] is None else
+                self.tokenize(
+                    i, '', random_start_end, mapped_index, mapped_schema, mode)
+                for i, item in enumerate(mapped_index)], [])
+            return features
+
         def _format(features):
             seqs_list = features[::2]
             segs_list = features[1::2]
@@ -263,9 +255,10 @@ class Dataset(object):
             else:
                 return True
 
-        process_fn = self.get_process_fn(mapped_index, mapped_schema, mode)
+        num_features = len(mapped_index)
         dataset = dataset.map(
-            lambda text: _format(process_fn(text)),
+            lambda text: _format(tf.py_function(
+                _featurize, [text], [tf.int32, tf.float32]*num_features)),
             num_parallel_calls=tf.data.experimental.AUTOTUNE)
         dataset = dataset.filter(_filter)
 
@@ -277,7 +270,6 @@ class Dataset(object):
         padded_shapes = (padded_shapes, [])
         dataset = dataset.padded_batch(batch_size, padded_shapes=padded_shapes)
         dataset = dataset.prefetch(buffer_size=tf.data.experimental.AUTOTUNE)
-
         return dataset
 
     def serving_input_fn(self, mapped_index, mapped_schema):
@@ -314,3 +306,38 @@ class Dataset(object):
                 data_utils_py3.seqs_segs_to_tokens(
                     seqs, segs, self.char_vocab))
         return text
+
+    def build_request(self, mapped_segments_list, mapped_index, mapped_schema):
+        """
+        build request to the model server
+        """
+        req = {'instances':[]}
+        for mapped_segments in mapped_segments_list:
+            ins = {}
+            for i, segment in enumerate(mapped_segments):
+                seqs, segs = self.tokenize(
+                    i, segment, None, mapped_index, mapped_schema, tf.estimator.ModeKeys.PREDICT)
+                ins[str(i)+'-seqs'] = seqs.tolist()
+                ins[str(i)+'-segs'] = segs.tolist()
+            req['instances'].append(ins)
+        return req
+
+    def parse_response(self, resp, mapped_index, mapped_schema):
+        """
+        parse response from the model server
+        """
+        mapped_segments_list = []
+        for pred in resp['predictions']:
+            mapped_segments = []
+            for i in range(len(mapped_index)):
+                seqs = pred.get(str(i)+'-seqs')
+                segs = pred.get(str(i)+'-segs')
+                if not seqs is None:
+                    segment_id = mapped_index[i]['segment_id']
+                    field_id = self.data_config['data_index'][segment_id]['field_id']
+                    text = self.textify(field_id, seqs, segs)
+                else:
+                    text = ''
+                mapped_segments.append(text)
+            mapped_segments_list.append(mapped_segments)
+        return mapped_segments_list

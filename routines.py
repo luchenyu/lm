@@ -1,4 +1,4 @@
-import logging, os, traceback
+import json, logging, os, requests, traceback
 import tensorflow as tf
 
 
@@ -240,3 +240,21 @@ def export(
     # perform the export
     lm.export_savedmodel(
         model.train_dir, lambda: dataset.serving_input_fn(mapped_index, mapped_schema), strip_default_attrs=True)
+
+class Client(object):
+    def __init__(self, dataset, model, field_mapping, model_name, ip='http://localhost', port=8501):
+        self.dataset = dataset
+        self.headers = {"content-type": "application/json"}
+        self.addr = ip.strip('/')+':'+str(port)+'/v1/models/'+model_name+':predict'
+        self.mapped_index, self.mapped_schema = dataset.task_mapping(
+            field_mapping, model.task_config['task_spec'])
+
+    def make_request(self, mapped_segments_list):
+        req = self.dataset.build_request(
+            mapped_segments_list, self.mapped_index, self.mapped_schema)
+        req = json.dumps(req, ensure_ascii=False)
+        resp = requests.post(self.addr, data=req, headers=self.headers)
+        resp = json.loads(resp.text, encoding='utf-8')
+        mapped_segments_list = self.dataset.parse_response(
+            resp, self.mapped_index, self.mapped_schema)
+        return mapped_segments_list

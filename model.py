@@ -387,6 +387,12 @@ class Model(object):
                 token_embeds = data_schema[field_id].get('token_embeds')
                 candidate_embeds = data_schema[field_id].get('candidate_embeds')
                 if token_embeds is None:
+                    candidate_embeds_var = tf.get_variable(
+                        "field/"+str(field_id)+"/candidate_embeds",
+                        shape=[len(token_vocab)-1, embed_size],
+                        dtype=tf.float32,
+                        initializer=tf.initializers.zeros(),
+                        trainable=False)
                     candidate_embeds, _ = word_embedder(
                         tf.expand_dims(candidate_ids, 0))
                     candidate_embeds = tf.squeeze(candidate_embeds, [0])
@@ -1009,6 +1015,12 @@ class Model(object):
                 token_embeds = data_schema[field_id].get('token_embeds')
                 candidate_embeds = data_schema[field_id].get('candidate_embeds')
                 if token_embeds is None:
+                    candidate_embeds_var = tf.get_variable(
+                        "field/"+str(field_id)+"/candidate_embeds",
+                        shape=[len(token_vocab)-1, embed_size],
+                        dtype=tf.float32,
+                        initializer=tf.initializers.zeros(),
+                        trainable=False)
                     candidate_embeds, _ = word_embedder(
                         tf.expand_dims(candidate_ids, 0))
                     candidate_embeds = tf.squeeze(candidate_embeds, [0])
@@ -1538,7 +1550,6 @@ class Model(object):
             seqs = features[str(i)+'-seqs']
             segs = features[str(i)+'-segs']
 
-            # segment
             if not token_vocab is None:
                 token_ids = data_schema[field_id].get('token_ids')
                 candidate_ids = data_schema[field_id].get('candidate_ids')
@@ -1563,86 +1574,102 @@ class Model(object):
                     data_schema[field_id]['token_ids'] = token_ids
                     data_schema[field_id]['candidate_ids'] = candidate_ids
                     data_schema[field_id]['candidate_freqs'] = candidate_freqs
-            if limited_vocab:
-                segmented_seqs = tf.gather(token_ids, seqs)
-            else:
-                if feature_type == 'class':
-                    segmented_seqs = tf.expand_dims(seqs, axis=1)
-                elif feature_type == 'sequence':
-                    segmented_seqs = segment_words(seqs, segs)
-                if not max_token_length is None:
-                    segmented_seqs = tf.cond(
-                        tf.less(tf.shape(segmented_seqs)[2], max_token_length),
-                        lambda: segmented_seqs,
-                        lambda: segmented_seqs[:,:,:max_token_length])
-            feature['segmented_seqs'] = segmented_seqs
 
-            # seq_length and token_length
-            seq_length = tf.shape(segmented_seqs)[1]
-            if token_vocab is None:
-                token_length = tf.shape(segmented_seqs)[2]
-            else:
-                token_length = tf.maximum(
-                    tf.shape(segmented_seqs)[2], tf.shape(token_ids)[1])
-            feature['seq_length'] = seq_length
-            feature['token_length'] = token_length
-
-            # embed words
-            if not token_vocab is None:
                 token_embeds = data_schema[field_id].get('token_embeds')
                 candidate_embeds = data_schema[field_id].get('candidate_embeds')
                 if token_embeds is None:
+                    candidate_embeds_var = tf.get_variable(
+                        "field/"+str(field_id)+"/candidate_embeds",
+                        shape=[len(token_vocab)-1, embed_size],
+                        dtype=tf.float32,
+                        initializer=tf.initializers.zeros(),
+                        trainable=False)
                     candidate_embeds, _ = word_embedder(
                         tf.expand_dims(candidate_ids, 0))
                     candidate_embeds = tf.squeeze(candidate_embeds, [0])
+                    assign_op = tf.assign(candidate_embeds_var, candidate_embeds)
+                    with tf.control_dependencies([assign_op]):
+                        candidate_embeds = tf.identity(candidate_embeds)
+                    candidate_embeds = tf.cond(
+                        tf.reduce_any(tf.not_equal(candidate_embeds_var, 0)),
+                        lambda: candidate_embeds_var,
+                        lambda: candidate_embeds)
                     token_embeds = tf.pad(candidate_embeds, [[1,0],[0,0]])
                     data_schema[field_id]['token_embeds'] = token_embeds
                     data_schema[field_id]['candidate_embeds'] = candidate_embeds
-            if limited_vocab:
-                word_embeds = tf.gather(token_embeds, seqs)
-                word_masks = tf.greater(seqs, 0)
-            else:
-                word_embeds, word_masks = word_embedder(
-                    segmented_seqs)
-            feature['word_embeds'] = word_embeds
-            feature['word_masks'] = word_masks
 
-            # field_encodes and posit_embeds
-            field_query_embeds = tf.tile(
-                tf.nn.embedding_lookup(field_query_embedding, [[field_id+1,]]),# field embeds 0 is reserved
-                [batch_size, seq_length, 1])
-            feature['field_query_embeds'] = tuple(tf.split(field_query_embeds, num_layers, axis=2))
-            field_key_embeds = tf.tile(
-                tf.nn.embedding_lookup(field_key_embedding, [[field_id+1,]]),# field embeds 0 is reserved
-                [batch_size, seq_length, 1])
-            feature['field_key_embeds'] = tuple(tf.split(field_key_embeds, num_layers, axis=2))
-            field_value_embeds = tf.tile(
-                tf.nn.embedding_lookup(field_value_embedding, [[field_id+1,]]),# field embeds 0 is reserved
-                [batch_size, seq_length, 1])
-            feature['field_value_embeds'] = tuple(tf.split(field_value_embeds, num_layers, axis=2))
-            if feature_type == 'sequence':
-                posit_ids = tf.tile(
-                    tf.expand_dims(tf.range(seq_length), 0), [batch_size, 1])
-                posit_embeds = model_utils_py3.embed_position(
-                    posit_ids,
-                    posit_size)
-            else:
-                posit_embeds = tf.zeros([batch_size, seq_length, posit_size])
-            feature['posit_embeds'] = posit_embeds
+            if target_level == 0:
+                # segment
+                if limited_vocab:
+                    segmented_seqs = tf.gather(token_ids, seqs)
+                else:
+                    if feature_type == 'class':
+                        segmented_seqs = tf.expand_dims(seqs, axis=1)
+                    elif feature_type == 'sequence':
+                        segmented_seqs = segment_words(seqs, segs)
+                    if not max_token_length is None:
+                        segmented_seqs = tf.cond(
+                            tf.less(tf.shape(segmented_seqs)[2], max_token_length),
+                            lambda: segmented_seqs,
+                            lambda: segmented_seqs[:,:,:max_token_length])
+                feature['segmented_seqs'] = segmented_seqs
 
-            # tfstruct
-            feature['tfstruct'] = model_utils_py3.TransformerStruct(
-                field_query_embeds=feature['field_query_embeds'],
-                field_key_embeds=feature['field_key_embeds'],
-                field_value_embeds=feature['field_value_embeds'],
-                posit_embeds=feature['posit_embeds'],
-                token_embeds=feature['word_embeds'],
-                masks=feature['word_masks'],
-                querys=None,
-                keys=None,
-                values=None,
-                encodes=None,
-            )
+                # seq_length and token_length
+                seq_length = tf.shape(segmented_seqs)[1]
+                if token_vocab is None:
+                    token_length = tf.shape(segmented_seqs)[2]
+                else:
+                    token_length = tf.maximum(
+                        tf.shape(segmented_seqs)[2], tf.shape(token_ids)[1])
+                feature['seq_length'] = seq_length
+                feature['token_length'] = token_length
+
+                # embed words
+                if limited_vocab:
+                    word_embeds = tf.gather(token_embeds, seqs)
+                    word_masks = tf.greater(seqs, 0)
+                else:
+                    word_embeds, word_masks = word_embedder(
+                        segmented_seqs)
+                feature['word_embeds'] = word_embeds
+                feature['word_masks'] = word_masks
+
+                # field_encodes and posit_embeds
+                field_query_embeds = tf.tile(
+                    tf.nn.embedding_lookup(field_query_embedding, [[field_id+1,]]),# field embeds 0 is reserved
+                    [batch_size, seq_length, 1])
+                feature['field_query_embeds'] = tuple(tf.split(field_query_embeds, num_layers, axis=2))
+                field_key_embeds = tf.tile(
+                    tf.nn.embedding_lookup(field_key_embedding, [[field_id+1,]]),# field embeds 0 is reserved
+                    [batch_size, seq_length, 1])
+                feature['field_key_embeds'] = tuple(tf.split(field_key_embeds, num_layers, axis=2))
+                field_value_embeds = tf.tile(
+                    tf.nn.embedding_lookup(field_value_embedding, [[field_id+1,]]),# field embeds 0 is reserved
+                    [batch_size, seq_length, 1])
+                feature['field_value_embeds'] = tuple(tf.split(field_value_embeds, num_layers, axis=2))
+                if feature_type == 'sequence':
+                    posit_ids = tf.tile(
+                        tf.expand_dims(tf.range(seq_length), 0), [batch_size, 1])
+                    posit_embeds = model_utils_py3.embed_position(
+                        posit_ids,
+                        posit_size)
+                else:
+                    posit_embeds = tf.zeros([batch_size, seq_length, posit_size])
+                feature['posit_embeds'] = posit_embeds
+
+                # tfstruct
+                feature['tfstruct'] = model_utils_py3.TransformerStruct(
+                    field_query_embeds=feature['field_query_embeds'],
+                    field_key_embeds=feature['field_key_embeds'],
+                    field_value_embeds=feature['field_value_embeds'],
+                    posit_embeds=feature['posit_embeds'],
+                    token_embeds=feature['word_embeds'],
+                    masks=feature['word_masks'],
+                    querys=None,
+                    keys=None,
+                    values=None,
+                    encodes=None,
+                )
 
         # add extra sample-level tfstruct
         global_tfstruct = model_utils_py3.TransformerStruct(
@@ -1716,7 +1743,6 @@ class Model(object):
 
         # loop for target_level
         predictions = {}
-        export_outputs = {}
         start_level = 1 if max_target_level > 0 else 0
         for tlevel in range(start_level, max_target_level+1):
 
@@ -2026,10 +2052,6 @@ class Model(object):
                     predictions[str(i)+'-seqs'] = features[str(i)+'-seqs']
                     predictions[str(i)+'-segs'] = features[str(i)+'-segs']
 
-                    # add to exports
-                    export_outputs[str(i)] = tf.estimator.export.PredictOutput(
-                        {'seqs':features[str(i)+'-seqs'], 'segs':features[str(i)+'-segs']})
-
                     if tlevel < max_target_level:
                         # embed words
                         if limited_vocab:
@@ -2100,4 +2122,7 @@ class Model(object):
 
         # return EstimatorSpec
         return tf.estimator.EstimatorSpec(
-            tf.estimator.ModeKeys.PREDICT, predictions=predictions, export_outputs=export_outputs)
+            tf.estimator.ModeKeys.PREDICT, predictions=predictions,
+            export_outputs={
+                tf.saved_model.signature_constants.DEFAULT_SERVING_SIGNATURE_DEF_KEY:
+                tf.estimator.export.PredictOutput(predictions)})
