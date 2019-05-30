@@ -272,16 +272,19 @@ class Dataset(object):
         dataset = dataset.prefetch(buffer_size=tf.data.experimental.AUTOTUNE)
         return dataset
 
-    def serving_input_fn(self, mapped_index, mapped_schema):
+    def serving_input_fn(self, mapped_index, mapped_schema, task_spec):
         """
         input fn for serving
         """
         receiver_tensors = {}
         for i in range(len(mapped_index)):
-            receiver_tensors[str(i)+'-seqs'] = tf.placeholder(
-                dtype=tf.int32, shape=[None, None])
-            receiver_tensors[str(i)+'-segs'] = tf.placeholder(
-                dtype=tf.float32, shape=[None, None])
+            field_id = mapped_index[i]['field_id']
+            target_level = task_spec[field_id]['target_level']
+            if target_level == 0:
+                receiver_tensors[str(i)+'-seqs'] = tf.placeholder(
+                    dtype=tf.int32, shape=[None, None])
+                receiver_tensors[str(i)+'-segs'] = tf.placeholder(
+                    dtype=tf.float32, shape=[None, None])
         features = {}
         for key in receiver_tensors:
             features[key] = tf.identity(receiver_tensors[key])
@@ -307,7 +310,7 @@ class Dataset(object):
                     seqs, segs, self.char_vocab))
         return text
 
-    def build_request(self, mapped_segments_list, mapped_index, mapped_schema):
+    def build_request(self, mapped_segments_list, mapped_index, mapped_schema, task_spec):
         """
         build request to the model server
         """
@@ -315,10 +318,14 @@ class Dataset(object):
         for mapped_segments in mapped_segments_list:
             ins = {}
             for i, segment in enumerate(mapped_segments):
-                seqs, segs = self.tokenize(
-                    i, segment, None, mapped_index, mapped_schema, tf.estimator.ModeKeys.PREDICT)
-                ins[str(i)+'-seqs'] = seqs.tolist()
-                ins[str(i)+'-segs'] = segs.tolist()
+                field_id = mapped_index[i]['field_id']
+                target_level = task_spec[field_id]['target_level']
+                if target_level == 0:
+                    seqs, segs = self.tokenize(
+                        i, segment, None,
+                        mapped_index, mapped_schema, tf.estimator.ModeKeys.PREDICT)
+                    ins[str(i)+'-seqs'] = seqs.tolist()
+                    ins[str(i)+'-segs'] = segs.tolist()
             req['instances'].append(ins)
         return req
 

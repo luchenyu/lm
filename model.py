@@ -387,12 +387,6 @@ class Model(object):
                 token_embeds = data_schema[field_id].get('token_embeds')
                 candidate_embeds = data_schema[field_id].get('candidate_embeds')
                 if token_embeds is None:
-                    candidate_embeds_var = tf.get_variable(
-                        "field/"+str(field_id)+"/candidate_embeds",
-                        shape=[len(token_vocab)-1, embed_size],
-                        dtype=tf.float32,
-                        initializer=tf.initializers.zeros(),
-                        trainable=False)
                     candidate_embeds, _ = word_embedder(
                         tf.expand_dims(candidate_ids, 0))
                     candidate_embeds = tf.squeeze(candidate_embeds, [0])
@@ -1015,12 +1009,6 @@ class Model(object):
                 token_embeds = data_schema[field_id].get('token_embeds')
                 candidate_embeds = data_schema[field_id].get('candidate_embeds')
                 if token_embeds is None:
-                    candidate_embeds_var = tf.get_variable(
-                        "field/"+str(field_id)+"/candidate_embeds",
-                        shape=[len(token_vocab)-1, embed_size],
-                        dtype=tf.float32,
-                        initializer=tf.initializers.zeros(),
-                        trainable=False)
                     candidate_embeds, _ = word_embedder(
                         tf.expand_dims(candidate_ids, 0))
                     candidate_embeds = tf.squeeze(candidate_embeds, [0])
@@ -1547,8 +1535,8 @@ class Model(object):
             max_token_length = data_schema[field_id].get('max_token_length')
             max_seq_length = data_schema[field_id].get('max_seq_length')
             target_level = task_spec[field_id]['target_level']
-            seqs = features[str(i)+'-seqs']
-            segs = features[str(i)+'-segs']
+            seqs = features.get(str(i)+'-seqs')
+            segs = features.get(str(i)+'-segs')
 
             if not token_vocab is None:
                 token_ids = data_schema[field_id].get('token_ids')
@@ -1578,22 +1566,9 @@ class Model(object):
                 token_embeds = data_schema[field_id].get('token_embeds')
                 candidate_embeds = data_schema[field_id].get('candidate_embeds')
                 if token_embeds is None:
-                    candidate_embeds_var = tf.get_variable(
-                        "field/"+str(field_id)+"/candidate_embeds",
-                        shape=[len(token_vocab)-1, embed_size],
-                        dtype=tf.float32,
-                        initializer=tf.initializers.zeros(),
-                        trainable=False)
                     candidate_embeds, _ = word_embedder(
                         tf.expand_dims(candidate_ids, 0))
                     candidate_embeds = tf.squeeze(candidate_embeds, [0])
-                    assign_op = tf.assign(candidate_embeds_var, candidate_embeds)
-                    with tf.control_dependencies([assign_op]):
-                        candidate_embeds = tf.identity(candidate_embeds)
-                    candidate_embeds = tf.cond(
-                        tf.reduce_any(tf.not_equal(candidate_embeds_var, 0)),
-                        lambda: candidate_embeds_var,
-                        lambda: candidate_embeds)
                     token_embeds = tf.pad(candidate_embeds, [[1,0],[0,0]])
                     data_schema[field_id]['token_embeds'] = token_embeds
                     data_schema[field_id]['candidate_embeds'] = candidate_embeds

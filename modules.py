@@ -950,7 +950,7 @@ class SentGenerator(object):
         self.global_matcher = global_matcher
         self.word_embedder = word_embedder
         self.word_generator = word_generator
-        self.decoder = lambda *args, **kwargs: model_utils_py3.beam_dec(
+        self.decoder = lambda *args, **kwargs: model_utils_py3.stochastic_beam_dec(
             *args, **kwargs, beam_size=16, num_candidates=1, cutoff_rate=0.1)
 
     def generate(

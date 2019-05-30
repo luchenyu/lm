@@ -239,19 +239,51 @@ def export(
 
     # perform the export
     lm.export_savedmodel(
-        model.train_dir, lambda: dataset.serving_input_fn(mapped_index, mapped_schema), strip_default_attrs=True)
+        model.train_dir, lambda: dataset.serving_input_fn(
+            mapped_index, mapped_schema, model.task_config['task_spec']),
+        strip_default_attrs=True)
+
+def convert_graph_def_to_saved_model(
+    export_dir,
+    graph_filepath,
+    inputs,
+    outputs):
+    """
+    convert GraphDef to SavedModel
+    """
+    def get_graph_def_from_file(graph_filepath):
+        with tf.Graph().as_default():
+            with tf.gfile.GFile(graph_filepath, 'rb') as f:
+                graph_def = tf.GraphDef()
+                graph_def.ParseFromString(f.read())
+                return graph_def
+    if tf.gfile.Exists(export_dir):
+        tf.gfile.DeleteRecursively(export_dir)
+    graph_def = get_graph_def_from_file(graph_filepath)
+    with tf.Session(graph=tf.Graph()) as session:
+        tf.import_graph_def(graph_def, name='')
+        tf.saved_model.simple_save(
+            session,
+            export_dir,
+            inputs={
+                key: session.graph.get_tensor_by_name(inputs[key]) for key in inputs},
+            outputs={
+                key: session.graph.get_tensor_by_name(outputs[key]) for key in outputs},
+        )
+    print('Optimized graph converted to SavedModel!')
 
 class Client(object):
-    def __init__(self, dataset, model, field_mapping, model_name, ip='http://localhost', port=8501):
+    def __init__(self, dataset, task_spec, field_mapping, model_name, ip='http://localhost', port=8501):
         self.dataset = dataset
         self.headers = {"content-type": "application/json"}
         self.addr = ip.strip('/')+':'+str(port)+'/v1/models/'+model_name+':predict'
+        self.task_spec = task_spec
         self.mapped_index, self.mapped_schema = dataset.task_mapping(
-            field_mapping, model.task_config['task_spec'])
+            field_mapping, task_spec)
 
     def make_request(self, mapped_segments_list):
         req = self.dataset.build_request(
-            mapped_segments_list, self.mapped_index, self.mapped_schema)
+            mapped_segments_list, self.mapped_index, self.mapped_schema, self.task_spec)
         req = json.dumps(req, ensure_ascii=False)
         resp = requests.post(self.addr, data=req, headers=self.headers)
         resp = json.loads(resp.text, encoding='utf-8')
