@@ -88,7 +88,7 @@ def get_embeddings(
         if not char_vocab_emb is None:
             char_vocab_initializer = tf.initializers.constant(char_vocab_emb)
         else:
-            char_vocab_initializer = tf.initializers.variance_scaling(mode='fan_out')
+            char_vocab_initializer = tf.initializers.truncated_normal()
         char_embedding = tf.get_variable(
             "char_embedding",
             shape=[char_vocab_size, char_vocab_dim], # _pad_ in char vocab is used in speller, so one more
@@ -97,6 +97,8 @@ def get_embeddings(
             trainable=training,
             collections=collections,
             aggregation=tf.VariableAggregation.MEAN)
+        char_embedding = model_utils_py3.layer_norm(
+            char_embedding, begin_norm_axis=-1, is_training=training)
         input_embedding = tf.concat([tf.zeros([1, char_vocab_dim]), char_embedding[1:]], axis=0)
 
         spellin_embedding = model_utils_py3.MLP(
@@ -113,7 +115,7 @@ def get_embeddings(
             "field_query_embedding",
             shape=[64, num_layers*layer_size],
             dtype=tf.float32,
-            initializer=tf.initializers.variance_scaling(mode='fan_out'),
+            initializer=tf.initializers.truncated_normal(),
             trainable=training,
             collections=collections,
             aggregation=tf.VariableAggregation.MEAN)
@@ -121,7 +123,7 @@ def get_embeddings(
             "field_key_embedding",
             shape=[64, num_layers*layer_size],
             dtype=tf.float32,
-            initializer=tf.initializers.variance_scaling(mode='fan_out'),
+            initializer=tf.initializers.truncated_normal(),
             trainable=training,
             collections=collections,
             aggregation=tf.VariableAggregation.MEAN)
@@ -129,7 +131,7 @@ def get_embeddings(
             "field_value_embedding",
             shape=[64, num_layers*layer_size],
             dtype=tf.float32,
-            initializer=tf.initializers.variance_scaling(mode='fan_out'),
+            initializer=tf.initializers.truncated_normal(),
             trainable=training,
             collections=collections,
             aggregation=tf.VariableAggregation.MEAN)
@@ -137,7 +139,7 @@ def get_embeddings(
             "field_prior_embedding",
             shape=[64, match_size],
             dtype=tf.float32,
-            initializer=tf.initializers.variance_scaling(mode='fan_out'),
+            initializer=tf.initializers.truncated_normal(),
             trainable=training,
             collections=collections,
             aggregation=tf.VariableAggregation.MEAN)
@@ -1844,6 +1846,7 @@ class Embedder(Module):
             l0_embeds = model_utils_py3.fully_connected(
                 char_embeds,
                 self.layer_size,
+                init_scale=1.0,
                 activation_fn=tf.nn.relu,
                 is_training=self.training,
                 scope="l0_convs")
@@ -1852,17 +1855,21 @@ class Embedder(Module):
                 char_embeds,
                 [self.layer_size]*2,
                 [[1,2],[1,3]],
+                init_scale=1.0,
                 activation_fn=tf.nn.relu,
                 is_training=self.training,
                 scope="l1_convs")
             l1_embeds *= char_masks
             char_embeds = tf.nn.max_pool(char_embeds, [1,1,2,1], [1,1,2,1], padding='SAME')
+            char_embeds = model_utils_py3.layer_norm(
+                char_embeds, begin_norm_axis=-1, is_training=self.training)
             char_masks = tf.reduce_any(tf.not_equal(char_embeds, 0.0), axis=-1, keepdims=True)
             char_masks = tf.cast(char_masks, tf.float32)
             l2_embeds = model_utils_py3.convolution2d(
                 char_embeds,
                 [self.layer_size]*2,
                 [[1,2],[1,3]],
+                init_scale=1.0,
                 activation_fn=tf.nn.relu,
                 is_training=self.training,
                 scope="l2_convs")
@@ -1877,6 +1884,7 @@ class Embedder(Module):
             word_embeds = model_utils_py3.fully_connected(
                 concat_embeds_normed,
                 self.layer_size,
+                init_scale=1.0,
                 dropout=self.dropout,
                 is_training=self.training,
                 scope="projs")
@@ -2067,6 +2075,7 @@ class Matcher(Module):
                 encode_projs = model_utils_py3.fully_connected(
                     encodes,
                     self.layer_size,
+                    init_scale=1.0,
                     is_training=self.training,
                     scope="encode_projs")
                 self.cached_encodes[encodes] = encode_projs
@@ -2088,6 +2097,7 @@ class Matcher(Module):
                 embed_projs = model_utils_py3.fully_connected(
                     embeds,
                     self.layer_size,
+                    init_scale=1.0,
                     is_training=self.training,
                     scope="embed_projs")
                 self.cached_embeds[embeds] = embed_projs
