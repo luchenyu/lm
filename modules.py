@@ -1338,6 +1338,7 @@ class ClassGenerator(object):
             scores: batch_size x num_candidates
         """
         batch_size = tf.shape(tfstruct.token_embeds)[0]
+        embed_dim = static_word_embeds.get_shape()[-1].value
 
         candidates_fn_list = []
         attn_masks = tf.zeros([batch_size, 1, 1], tf.bool)
@@ -1369,7 +1370,7 @@ class ClassGenerator(object):
             sample_token_logits = self.global_matcher(
                 (global_latents, None, 'latent'),
                 (static_word_embeds, None, 'embed'))
-            if word_priors is None:
+            if static_word_priors is None:
                 token_prior_logits = self.global_matcher(
                     (field_prior_embeds, None, 'latent'),
                     (static_word_embeds, None, 'embed'))
@@ -1385,7 +1386,7 @@ class ClassGenerator(object):
                 candidate_copy_logits = self.word_matcher(
                     (attn_word_embeds_flatten, None, 'latent'),
                     (static_word_embeds, None, 'latent'))
-                candidate_copy_logits = tf.reshpe(
+                candidate_copy_logits = tf.reshape(
                     candidate_copy_logits, [batch_size, attn_seq_length, static_length])
 
             def candidates_fn(encodes):
@@ -1503,7 +1504,7 @@ class ClassGenerator(object):
             candidates_fn_list.append(candidates_fn)
 
         concat_embeds, concat_ids, concat_masks, concat_logits = concat_candidates(
-            word_encodes, candidates_fn_list)
+            word_encodes, candidates_fn_list=candidates_fn_list)
 
         indices = tf.argmax(concat_logits, 1, output_type=tf.int32)
         batch_indices = tf.stack([tf.range(batch_size, dtype=tf.int32), indices], axis=1)
