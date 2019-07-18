@@ -674,7 +674,7 @@ class Model(object):
                     global_encodes, field_prior_embeds,
                     candidate_word_ids, candidate_word_embeds,
                     candidate_valid_masks,
-                    target_seqs,
+                    target_seqs, None,
                 )
                 if regulation_losses.get(field_id) is None:
                     regulation_losses[field_id] = []
@@ -715,7 +715,7 @@ class Model(object):
                         attn_encodes, attn_valid_masks,
                         global_encodes, field_prior_embeds,
                         candidate_word_ids, candidate_word_embeds,
-                        candidate_valid_masks,
+                        candidate_valid_masks, None,
                         target_seqs,
                     )
                 elif feature_type == 'class':
@@ -744,7 +744,7 @@ class Model(object):
                         attn_encodes, attn_valid_masks,
                         global_encodes, field_prior_embeds,
                         candidate_word_ids, candidate_word_embeds,
-                        candidate_valid_masks,
+                        candidate_valid_masks, None,
                         target_seqs,
                     )
                 else:
@@ -807,7 +807,6 @@ class Model(object):
             loss_train,
             global_step,
             optimizer,
-            wd=hyper_params.get('wd'),
             var_list=var_list,
             scope=None)
         hooks = []
@@ -1198,6 +1197,7 @@ class Model(object):
             token_ids = data_schema[field_id].get('token_ids')
             token_embeds = data_schema[field_id].get('token_embeds')
             candidate_ids = data_schema[field_id].get('candidate_ids')
+            candidate_freqs = data_schema[field_id].get('candidate_freqs')
             candidate_embeds = data_schema[field_id].get('candidate_embeds')
             target_seqs = None if candidate_ids is None else features[str(i)+'-seqs']-1
             max_token_length = data_schema[field_id].get('max_token_length')
@@ -1286,15 +1286,18 @@ class Model(object):
             else:
                 candidate_word_ids, candidate_word_embeds, candidate_valid_masks \
                 = None, None, None
+            candidate_priors = None
             if limited_vocab:
                 candidate_word_ids = candidate_ids
                 candidate_word_embeds = candidate_embeds
+                if not candidate_freqs is None:
+                    candidate_priors = candidate_freqs / tf.reduce_sum(candidate_freqs)
 
             # regulation loss
             if target_level == 0:
                 encodes = feature['masked_tfstruct'].encodes
                 pick_masks = feature['pick_masks']
-                loss, accuracy = word_trainer(
+                loss, ms = word_trainer(
                     limited_vocab,
                     word_ids, word_embeds, encodes,
                     valid_masks, pick_masks,
@@ -1302,13 +1305,19 @@ class Model(object):
                     attn_encodes, attn_valid_masks,
                     global_encodes, field_prior_embeds,
                     candidate_word_ids, candidate_word_embeds,
-                    candidate_valid_masks,
+                    candidate_valid_masks, candidate_priors,
                     target_seqs,
                 )
                 if losses.get(field_id) is None:
                     losses[field_id] = []
                 losses[field_id].append(loss)
-                metrics[str(i)] = accuracy
+                accuracy, precisions, recalls = ms
+                metrics[str(i)+'-accuracy'] = accuracy
+                if not (precisions is None or recalls is None):
+                    for k, p in enumerate(precisions):
+                        metrics[str(i)+'-precision-'+str(k)] = p
+                    for k, r in enumerate(recalls):
+                        metrics[str(i)+'-recall-'+str(k)] = r
 
             # target loss
             if target_level > 0:
@@ -1337,7 +1346,7 @@ class Model(object):
                         dec_tfstruct=None,
                         enc_tfstruct=extra_tfstruct,
                     )
-                    loss, accuracy = sent_trainer(
+                    loss, ms = sent_trainer(
                         initial_state,
                         limited_vocab,
                         word_ids, word_embeds, valid_masks,
@@ -1345,7 +1354,7 @@ class Model(object):
                         attn_encodes, attn_valid_masks,
                         global_encodes, field_prior_embeds,
                         candidate_word_ids, candidate_word_embeds,
-                        candidate_valid_masks,
+                        candidate_valid_masks, candidate_priors,
                         target_seqs,
                     )
                 elif feature_type == 'class':
@@ -1366,7 +1375,7 @@ class Model(object):
                         [[1,]+[1,]*len(extra_tfstruct_list)], extra_tfstruct_list)[0]
                     encodes = tfstruct.encodes
                     pick_masks = tf.ones([batch_size, 1], dtype=tf.bool)
-                    loss, accuracy = word_trainer(
+                    loss, ms = word_trainer(
                         limited_vocab,
                         word_ids, word_embeds, encodes,
                         valid_masks, pick_masks,
@@ -1374,15 +1383,21 @@ class Model(object):
                         attn_encodes, attn_valid_masks,
                         global_encodes, field_prior_embeds,
                         candidate_word_ids, candidate_word_embeds,
-                        candidate_valid_masks,
+                        candidate_valid_masks, candidate_priors,
                         target_seqs,
                     )
                 else:
-                    loss, accuracy = None, None
+                    loss, metrics = None, None
                 if losses.get(field_id) is None:
                     losses[field_id] = []
                 losses[field_id].append(loss)
-                metrics[str(i)] = accuracy
+                accuracy, precisions, recalls = ms
+                metrics[str(i)+'-accuracy'] = accuracy
+                if not (precisions is None or recalls is None):
+                    for k, p in enumerate(precisions):
+                        metrics[str(i)+'-precision-'+str(k)] = p
+                    for k, r in enumerate(recalls):
+                        metrics[str(i)+'-recall-'+str(k)] = r
 
         # gather losses
         if max_target_level == 0:

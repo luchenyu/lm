@@ -38,25 +38,28 @@ def get_optimizer(
                 tf.less(x, pct_start),
                 lambda: 0.95 + (0.85 - 0.95)*(x/pct_start),
                 lambda: -0.05*tf.math.cos((x-pct_start)/(1.0-pct_start)*math.pi) + 0.9)
-            optimizer = MyAdamOptimizer(
+            optimizer = model_utils_py3.LAMBOptimizer(
                 learning_rate=learning_rate,
                 beta1=0.95,
                 beta1_t=momentum,
-                beta2=0.999)
+                beta2=0.999,
+                wd=wd)
         elif schedule == 'lr_finder':
             """lr range test"""
             x = (tf.cast(global_step, tf.float32) % float(num_steps)) / float(num_steps)
             log_lr = -7.0 + x*(1.0 - (-7.0))
             learning_rate = tf.pow(10.0, log_lr)
-            optimizer = MyAdamOptimizer(
+            optimizer = model_utils_py3.LAMBOptimizer(
                 learning_rate=learning_rate,
                 beta1=0.9,
-                beta2=0.999)
+                beta2=0.999,
+                wd=wd)
         else:
-            optimizer = MyAdamOptimizer(
+            optimizer = model_utils_py3.LAMBOptimizer(
                 learning_rate=max_lr,
                 beta1=0.9,
-                beta2=0.999)
+                beta2=0.999,
+                wd=wd)
 
     return optimizer
 
@@ -223,7 +226,7 @@ def train_masked(
     global_matcher=None, global_encodes=None,
     field_prior_embeds=None,
     candidate_token_ids=None, candidate_token_embeds=None,
-    candidate_valid_masks=None,
+    candidate_valid_masks=None, candidate_priors=None,
     target_seqs=None,
     extra_loss_fn=None):
     """
@@ -334,7 +337,7 @@ def train_masked(
 
     if limited_vocab:
 
-        num_candidates = tf.shape(candidate_token_ids)[0]
+        num_candidates = candidate_token_ids.get_shape()[0].value
 
         # local context - token distribution
         context_token_logits = matcher(
@@ -363,7 +366,10 @@ def train_masked(
                 token_prior_labels)
             token_prior_labels *= 1.0/token_prior_labels_sum
 
-            context_token_logits += tf.stop_gradient(token_prior_logits)
+            if candidate_priors is None:
+                context_token_logits += tf.stop_gradient(token_prior_logits)
+            else:
+                context_token_logits += tf.expand_dims(tf.log(candidate_priors), axis=0)
 
             # sample latent - token distribution
             sample_token_logits = global_matcher(
@@ -527,8 +533,22 @@ def train_masked(
     accuracy = tf.metrics.accuracy(
         labels=groundtruths,
         predictions=predictions)
+    if limited_vocab:
+        precisions = []
+        recalls = []
+        labels = tf.one_hot(groundtruths, num_candidates, axis=0)
+        predictions = tf.one_hot(predictions, num_candidates, axis=0)
+        for i in range(num_candidates):
+            precisions.append(tf.metrics.precision(
+                labels=labels[i],
+                predictions=predictions[i]))
+            recalls.append(tf.metrics.recall(
+                labels=labels[i],
+                predictions=predictions[i]))
+    else:
+        precisions, recalls = None, None
 
-    return loss, accuracy
+    return loss, (accuracy, precisions, recalls)
 
 def train_seq(
     initial_state,
@@ -540,7 +560,7 @@ def train_seq(
     global_matcher=None, global_encodes=None,
     field_prior_embeds=None,
     candidate_token_ids=None, candidate_token_embeds=None,
-    candidate_valid_masks=None,
+    candidate_valid_masks=None, candidate_priors=None,
     target_seqs=None,
     extra_loss_fn=None):
     """
@@ -578,7 +598,7 @@ def train_seq(
         attn_seq_ids = tf.tile(
             tf.expand_dims(tf.range(seq_length-1), axis=0), [batch_size,1])
         attn_seq_ids = tf.pad(attn_seq_ids, [[0,0],[0,attn_length]])
-    loss, accuracy = train_masked(
+    loss, metrics = train_masked(
         matcher,
         limited_vocab,
         token_ids, token_embeds, encodes,
@@ -589,12 +609,12 @@ def train_seq(
         global_matcher, global_encodes,
         field_prior_embeds,
         candidate_token_ids, candidate_token_embeds,
-        candidate_valid_masks,
+        candidate_valid_masks, candidate_priors,
         target_seqs,
         extra_loss_fn=extra_loss_fn,
     )
 
-    return loss, accuracy
+    return loss, metrics
 
 class SpellerTrainer(object):
     """get the loss of a speller"""
@@ -648,7 +668,7 @@ class SpellerTrainer(object):
                 token_onehots, self.spellin_embedding)
             token_embeds = tf.reshape(
                 token_embeds, [batch_size, seq_length, vocab_dim])
-            loss, accuracy = train_seq(
+            loss, metrics = train_seq(
                 initial_state,
                 self.speller_cell, self.speller_matcher,
                 True,
@@ -658,7 +678,7 @@ class SpellerTrainer(object):
                 target_seqs=target_seqs,
             )
 
-        return loss, accuracy
+        return loss, metrics
 
 class WordTrainer(object):
     """own a speller_trainer and """
@@ -700,14 +720,14 @@ class WordTrainer(object):
         attn_encodes, attn_valid_masks,
         global_encodes, field_prior_embeds,
         candidate_word_ids, candidate_word_embeds,
-        candidate_valid_masks=None,
+        candidate_valid_masks=None, candidate_priors=None,
         target_seqs=None):
         """
         add speller loss if not limited_vocab
         """
         with tf.variable_scope(self.scope, reuse=True):
             speller_loss_fn = None if limited_vocab else self.speller_loss_fn
-            loss, accuracy = train_masked(
+            loss, metrics = train_masked(
                 self.matcher,
                 limited_vocab,
                 word_ids, word_embeds, encodes,
@@ -718,12 +738,12 @@ class WordTrainer(object):
                 self.global_matcher, global_encodes,
                 field_prior_embeds,
                 candidate_word_ids, candidate_word_embeds,
-                candidate_valid_masks,
+                candidate_valid_masks, candidate_priors,
                 target_seqs,
                 extra_loss_fn=speller_loss_fn,
             )
 
-        return loss, accuracy
+        return loss, metrics
 
 class SentTrainer(object):
     """get the loss of a sent"""
@@ -748,14 +768,14 @@ class SentTrainer(object):
         attn_encodes, attn_valid_masks,
         global_encodes, field_prior_embeds,
         candidate_word_ids, candidate_word_embeds,
-        candidate_valid_masks=None,
+        candidate_valid_masks=None, candidate_priors=None,
         target_seqs=None):
         """
         feed the inputs into cell, get the outputs, and then get the loss
         """
         with tf.variable_scope(self.scope, reuse=True):
             speller_loss_fn = None if limited_vocab else self.word_trainer.speller_loss_fn
-            loss, accuracy = train_seq(
+            loss, metrics = train_seq(
                 initial_state,
                 self.cell, self.word_trainer.matcher,
                 limited_vocab,
@@ -765,12 +785,12 @@ class SentTrainer(object):
                 self.word_trainer.global_matcher, global_encodes,
                 field_prior_embeds,
                 candidate_word_ids, candidate_word_embeds,
-                candidate_valid_masks,
+                candidate_valid_masks, candidate_priors,
                 target_seqs,
                 extra_loss_fn=speller_loss_fn,
             )
 
-        return loss, accuracy
+        return loss, metrics
 
 
 """Generator"""
@@ -2107,20 +2127,3 @@ class Matcher(Module):
         self.embed_reuse = True
 
         return embed_projs
-
-
-""" Optimizers """
-
-class MyAdamOptimizer(tf.train.AdamOptimizer):
-    def __init__(self, learning_rate=0.001, beta1=0.9, beta1_t=None, beta2=0.999, epsilon=1e-8,
-                 use_locking=False, name="Adam"):
-        """beta1 is the initial momentum, beta1_t is the dynamic momentum"""
-        tf.train.AdamOptimizer.__init__(
-            self, learning_rate=learning_rate, beta1=beta1, beta2=beta2, epsilon=epsilon,
-            use_locking=use_locking, name=name)
-        self.beta1_t = beta1_t
-
-    def _prepare(self):
-        tf.train.AdamOptimizer._prepare(self)
-        if self.beta1_t != None:
-            self._beta1_t = self.beta1_t

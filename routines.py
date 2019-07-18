@@ -49,6 +49,8 @@ def train_and_evaluate(
     model,
     field_mapping,
     hyper_params,
+    train_file='train',
+    dev_file='dev',
     eval_every=10000,
     distributed=True):
     """
@@ -103,13 +105,13 @@ def train_and_evaluate(
                 hyper_params['max_train_steps'] - counter)
             lm.train(
                 input_fn=lambda: dataset.file_input_fn(
-                    'train', mapped_index, mapped_schema,
+                    train_file, mapped_index, mapped_schema,
                     hyper_params['batch_size'], tf.estimator.ModeKeys.TRAIN),
                 steps=steps)
             counter = model.get_global_step()
             lm.evaluate(
                 input_fn=lambda: dataset.file_input_fn(
-                    'dev', mapped_index, mapped_schema,
+                    dev_file, mapped_index, mapped_schema,
                     hyper_params['batch_size'], tf.estimator.ModeKeys.EVAL))
     except:
         traceback.print_exc()
@@ -121,7 +123,8 @@ def evaluate(
     dataset,
     model,
     field_mapping,
-    hyper_params):
+    hyper_params,
+    eval_file='eval'):
     """
     train the model and evaluate every eval_every steps
     """
@@ -148,14 +151,15 @@ def evaluate(
     # start evaluation
     lm.evaluate(
         input_fn=lambda: dataset.file_input_fn(
-            'eval', mapped_index, mapped_schema,
+            eval_file, mapped_index, mapped_schema,
             hyper_params['batch_size'], tf.estimator.ModeKeys.EVAL))
 
 def predict(
     dataset,
     model,
     field_mapping,
-    hyper_params):
+    hyper_params,
+    test_file='test'):
     """
     use trained model to do prediction on test samples
     """
@@ -182,7 +186,7 @@ def predict(
     # start prediction
     predictions = lm.predict(
         input_fn=lambda: dataset.file_input_fn(
-            'test', mapped_index, mapped_schema,
+            test_file, mapped_index, mapped_schema,
             hyper_params['batch_size'], tf.estimator.ModeKeys.PREDICT))
 
     # get the target features
