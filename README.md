@@ -76,6 +76,7 @@
     'field_mapping': [int,], ## list by field_id, list elem is field_id of dataset
     'hyper_params': {
         'batch_size': int,
+        'update_every': int,
         'max_train_steps': int,
         'max_lr': float,
         'pct_start': 0~1,

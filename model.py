@@ -34,6 +34,7 @@ class LRFinderHook(tf.train.SessionRunHook):
     def after_run(self, run_context, run_values):
         learning_rate = run_values.results['learning_rate']
         loss = run_values.results['loss']
+        global_step = run_values.results['global_step']
         self.learning_rates.append(learning_rate)
         self.losses.append(loss)
         if len(self.losses_smoothed) == 0:
@@ -167,6 +168,7 @@ class Model(object):
             ],
             'hyper_params': {
                 'batch_size': int,
+                'update_every': int,
                 'max_train_steps': int,
                 'max_lr': float,
                 'pct_start': 0~1,
@@ -808,6 +810,7 @@ class Model(object):
             global_step,
             optimizer,
             var_list=var_list,
+            update_every=hyper_params.get('update_every'),
             scope=None)
         hooks = []
         if params.get('schedule') == 'lr_finder':
