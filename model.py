@@ -2044,6 +2044,7 @@ class Model(object):
                     # add to predictions
                     predictions[str(i)+'-seqs'] = features[str(i)+'-seqs']
                     predictions[str(i)+'-segs'] = features[str(i)+'-segs']
+                    predictions[str(i)+'-scores'] = scores[:,0]
 
                     if tlevel < max_target_level:
                         # embed words

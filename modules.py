@@ -1512,9 +1512,11 @@ class ClassGenerator(object):
             classes = tf.gather(concat_ids, indices)
         elif len(concat_embeds.get_shape()) == 3:
             classes = tf.gather_nd(concat_ids, batch_indices)
-        scores = tf.gather_nd(concat_logits, batch_indices)
+        concat_probs = tf.cast(concat_masks, dtype=tf.float32)*tf.nn.softmax(concat_logits)
+        concat_probs /= tf.reduce_sum(concat_probs, axis=-1, keepdims=True)
+        scores = tf.gather_nd(concat_probs, batch_indices)
         classes = tf.expand_dims(tf.expand_dims(classes, axis=1), axis=1)
-        scores = tf.expand_dims(tf.expand_dims(scores, axis=1), axis=1)
+        scores = tf.expand_dims(scores, axis=1)
         return classes, scores
 
 

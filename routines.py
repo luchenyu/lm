@@ -205,13 +205,20 @@ def predict(
     with open(data_path, 'w') as fwrite:
         for pred in predictions:
             text_list = []
+            score_list = []
             for feature_id in target_feature_ids:
                 seqs = pred[str(feature_id)+'-seqs']
                 segs = pred[str(feature_id)+'-segs']
+                scores = pred[str(feature_id)+'-scores']
                 source_field_id = field_mapping[mapped_index[feature_id]['field_id']]
                 text = dataset.textify(source_field_id, seqs, segs)
                 text_list.append(text)
-            fwrite.write(dataset.data_config['segment_delim'].join(text_list)+'\n')
+                score_list.append(str(scores))
+            fwrite.write(
+                dataset.data_config['segment_delim'].join(text_list) + \
+                dataset.data_config['segment_delim'] + \
+                dataset.data_config['segment_delim'].join(score_list) + \
+                '\n')
 
 def export(
     dataset,
