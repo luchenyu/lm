@@ -8,12 +8,12 @@ from modules import *
 
 """training hook"""
 
-class LRFinderHook(tf.train.SessionRunHook):
+class LRFinderHook(tf.estimator.SessionRunHook):
     def __init__(
         self,
         fetches,
         num_steps):
-        tf.logging.info('Create LRFinderHook.')
+        tf.compat.v1.logging.info('Create LRFinderHook.')
         self.fetches = fetches
         self.num_steps = num_steps
         self.learning_rates = []
@@ -29,7 +29,7 @@ class LRFinderHook(tf.train.SessionRunHook):
         pass
 
     def before_run(self, run_context):        
-        return tf.train.SessionRunArgs(self.fetches)
+        return tf.estimator.SessionRunArgs(self.fetches)
 
     def after_run(self, run_context, run_values):
         learning_rate = run_values.results['learning_rate']
@@ -143,7 +143,7 @@ class Model(object):
         features, # This is batch_features from input_fn
         labels,   # This is batch_labels from input_fn
         mode,     # An instance of tf.estimator.ModeKeys
-        params):  # Additional configuration
+        params):   # Additional configuration
         """
         lm model function for tf.estimator
         features:
@@ -194,7 +194,7 @@ class Model(object):
         self,
         features, # This is batch_features from input_fn
         labels,   # This is batch_labels from input_fn
-        params):  # Additional configuration
+        params):   # Additional configuration
         """
         lm model function for tf.estimator
         features:
@@ -455,7 +455,7 @@ class Model(object):
                 pick_prob = 0.1
             else:
                 pick_prob = None
-            pick_masks = tf.less(tf.random_uniform([batch_size, seq_length]), pick_prob)
+            pick_masks = tf.less(tf.random.uniform([batch_size, seq_length]), pick_prob)
             pick_masks = tf.logical_and(pick_masks, word_masks)
             feature['pick_masks'] = pick_masks
 
@@ -778,17 +778,17 @@ class Model(object):
 
         # print total num of parameters
         total_params = 0
-        for var in tf.global_variables():
+        for var in tf.compat.v1.trainable_variables():
 #             print(var)
             local_params=1
             shape = var.get_shape()  #getting shape of a variable
             for i in shape:
                 local_params *= i.value  #mutiplying dimension values
             total_params += local_params
-        tf.logging.info('total number of parameters is: {}'.format(total_params))
+        tf.compat.v1.logging.info('total number of parameters is: {}'.format(total_params))
 
         # return EstimatorSpec
-        global_step = tf.train.get_global_step()
+        global_step = tf.compat.v1.train.get_global_step()
         optimizer = get_optimizer(
             params['schedule'],
             global_step,
@@ -1070,7 +1070,7 @@ class Model(object):
                 pick_prob = 0.2
             elif feature_type == 'class':
                 pick_prob = 0.1
-            pick_masks = tf.less(tf.random_uniform([batch_size, seq_length]), pick_prob)
+            pick_masks = tf.less(tf.random.uniform([batch_size, seq_length]), pick_prob)
             pick_masks = tf.logical_and(pick_masks, word_masks)
             feature['pick_masks'] = pick_masks
 
@@ -1418,14 +1418,14 @@ class Model(object):
 
         # print total num of parameters
         total_params = 0
-        for var in tf.global_variables():
+        for var in tf.compat.v1.global_variables():
 #             print(var)
             local_params=1
             shape = var.get_shape()  #getting shape of a variable
             for i in shape:
                 local_params *= i.value  #mutiplying dimension values
             total_params += local_params
-        tf.logging.info('total number of parameters is: {}'.format(total_params))
+        tf.compat.v1.logging.info('total number of parameters is: {}'.format(total_params))
 
         # return EstimatorSpec
         return tf.estimator.EstimatorSpec(
@@ -2105,14 +2105,14 @@ class Model(object):
 
         # print total num of parameters
         total_params = 0
-        for var in tf.global_variables():
+        for var in tf.compat.v1.global_variables():
 #             print(var)
             local_params=1
             shape = var.get_shape()  #getting shape of a variable
             for i in shape:
                 local_params *= i.value  #mutiplying dimension values
             total_params += local_params
-        tf.logging.info('total number of parameters is: {}'.format(total_params))
+        tf.compat.v1.logging.info('total number of parameters is: {}'.format(total_params))
 
         # return EstimatorSpec
         return tf.estimator.EstimatorSpec(

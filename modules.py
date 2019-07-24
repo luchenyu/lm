@@ -22,7 +22,7 @@ def get_optimizer(
         num_steps: num_steps to train
         pct_start: % of increasing lr phase
     """
-    with tf.variable_scope("scheduler"):
+    with tf.compat.v1.variable_scope("scheduler"):
 
         if schedule == '1cycle':
             """ 1cycle schedule """
@@ -82,17 +82,17 @@ def get_embeddings(
         layer_size: size of the layer
         training: bool
     """
-    with tf.variable_scope("embedding", reuse=reuse):
+    with tf.compat.v1.variable_scope("embedding", reuse=reuse):
 
-        collections = [tf.GraphKeys.GLOBAL_VARIABLES]
+        collections = [tf.compat.v1.GraphKeys.GLOBAL_VARIABLES]
         if training:
-            collections.append(tf.GraphKeys.WEIGHTS)
+            collections.append(tf.compat.v1.GraphKeys.WEIGHTS)
 
         if not char_vocab_emb is None:
             char_vocab_initializer = tf.initializers.constant(char_vocab_emb)
         else:
             char_vocab_initializer = tf.initializers.truncated_normal()
-        char_embedding = tf.get_variable(
+        char_embedding = tf.compat.v1.get_variable(
             "char_embedding",
             shape=[char_vocab_size, char_vocab_dim], # _pad_ in char vocab is used in speller, so one more
             dtype=tf.float32,
@@ -114,7 +114,7 @@ def get_embeddings(
         spellin_embedding = model_utils_py3.layer_norm(
             spellin_embedding, begin_norm_axis=-1, is_training=training)
 
-        field_query_embedding = tf.get_variable(
+        field_query_embedding = tf.compat.v1.get_variable(
             "field_query_embedding",
             shape=[64, num_layers*layer_size],
             dtype=tf.float32,
@@ -122,7 +122,7 @@ def get_embeddings(
             trainable=training,
             collections=collections,
             aggregation=tf.VariableAggregation.MEAN)
-        field_key_embedding = tf.get_variable(
+        field_key_embedding = tf.compat.v1.get_variable(
             "field_key_embedding",
             shape=[64, num_layers*layer_size],
             dtype=tf.float32,
@@ -130,7 +130,7 @@ def get_embeddings(
             trainable=training,
             collections=collections,
             aggregation=tf.VariableAggregation.MEAN)
-        field_value_embedding = tf.get_variable(
+        field_value_embedding = tf.compat.v1.get_variable(
             "field_value_embedding",
             shape=[64, num_layers*layer_size],
             dtype=tf.float32,
@@ -138,7 +138,7 @@ def get_embeddings(
             trainable=training,
             collections=collections,
             aggregation=tf.VariableAggregation.MEAN)
-        field_prior_embedding = tf.get_variable(
+        field_prior_embedding = tf.compat.v1.get_variable(
             "field_prior_embedding",
             shape=[64, match_size],
             dtype=tf.float32,
@@ -160,7 +160,7 @@ def segment_words(
         seqs: batch_size x seq_length
         segs: batch_size x (seq_length + 1)
     """
-    with tf.variable_scope("segment_words"):
+    with tf.compat.v1.variable_scope("segment_words"):
 
         batch_size = tf.shape(seqs)[0]
         length = tf.shape(seqs)[1]
@@ -179,7 +179,7 @@ def encode_tfstructs(
     """
     encode the tfstructs and distribute the result
     """
-    with tf.variable_scope("encode_tfstructs"):
+    with tf.compat.v1.variable_scope("encode_tfstructs"):
 
         batch_size = tf.shape(tfstruct_list[0].token_embeds)[0]
         attn_list = tfstruct_list
@@ -369,7 +369,7 @@ def train_masked(
             if candidate_priors is None:
                 context_token_logits += tf.stop_gradient(token_prior_logits)
             else:
-                context_token_logits += tf.expand_dims(tf.log(candidate_priors), axis=0)
+                context_token_logits += tf.expand_dims(tf.math.log(candidate_priors), axis=0)
 
             # sample latent - token distribution
             sample_token_logits = global_matcher(
@@ -378,7 +378,7 @@ def train_masked(
             sample_token_onehots = tf.one_hot(
                 target_seqs, num_candidates,
                 on_value=True, off_value=False)
-            sample_token_onehots = tf.logical_and(
+            sample_token_onehots = tf.math.logical_and(
                 sample_token_onehots,
                 tf.expand_dims(valid_masks, axis=2))
             sample_token_onehots = tf.cast(
@@ -494,7 +494,7 @@ def train_masked(
             token_prior_loss = tf.nn.softmax_cross_entropy_with_logits_v2(
                 labels=tf.stop_gradient(labels),
                 logits=logits)
-            token_prior_loss += tf.reduce_sum(labels*tf.log(labels+1e-12))
+            token_prior_loss += tf.reduce_sum(labels*tf.math.log(labels+1e-12))
             # sample latent - token loss
             labels = tf.reshape(
                 sample_token_labels, [batch_size*num_candidates])
@@ -503,7 +503,7 @@ def train_masked(
             sample_token_loss = tf.nn.softmax_cross_entropy_with_logits_v2(
                 labels=tf.stop_gradient(labels),
                 logits=logits)
-            sample_token_loss += tf.reduce_sum(labels*tf.log(labels+1e-12))
+            sample_token_loss += tf.reduce_sum(labels*tf.math.log(labels+1e-12))
 
             extra_loss = 0.1*(token_prior_loss+sample_token_loss)
         else:
@@ -517,7 +517,7 @@ def train_masked(
         context_token_loss = tf.nn.softmax_cross_entropy_with_logits_v2(
             labels=tf.stop_gradient(labels),
             logits=logits)
-        context_token_loss += tf.reduce_sum(labels*tf.log(labels+1e-12))
+        context_token_loss += tf.reduce_sum(labels*tf.math.log(labels+1e-12))
         # total loss
         loss = context_token_loss + extra_loss
         return loss
@@ -530,7 +530,7 @@ def train_masked(
     if not extra_loss_fn is None:
         loss += extra_loss_fn(**locals())
 
-    accuracy = tf.metrics.accuracy(
+    accuracy = tf.compat.v1.metrics.accuracy(
         labels=groundtruths,
         predictions=predictions)
     if limited_vocab:
@@ -632,7 +632,7 @@ class SpellerTrainer(object):
         self.spellin_embedding = spellin_embedding
         self.speller_cell = speller_cell
         self.speller_matcher = speller_matcher
-        with tf.variable_scope(scope) as sc:
+        with tf.compat.v1.variable_scope(scope) as sc:
             self.scope = sc
 
     def __call__(
@@ -646,7 +646,7 @@ class SpellerTrainer(object):
             word_encodes: batch_size x word_layer_size
             target_seqs: batch_size x dec_seq_length
         """
-        with tf.variable_scope(self.scope, reuse=True):
+        with tf.compat.v1.variable_scope(self.scope, reuse=True):
             batch_size = tf.shape(target_seqs)[0]
             seq_length = tf.shape(target_seqs)[1]+2
             vocab_size = tf.shape(self.spellin_embedding)[0]
@@ -656,7 +656,7 @@ class SpellerTrainer(object):
                 word_encodes=word_encodes,
                 dec_tfstruct=None)
             target_seqs = tf.pad(target_seqs, [[0,0],[2,2]])
-            valid_masks = tf.logical_or(
+            valid_masks = tf.math.logical_or(
                 tf.not_equal(target_seqs[:,:-2], 0),
                 tf.not_equal(target_seqs[:,2:], 0))
             target_seqs = target_seqs[:,1:-1]
@@ -693,7 +693,7 @@ class WordTrainer(object):
         self.matcher = matcher
         self.global_matcher = global_matcher
         self.speller_trainer = speller_trainer
-        with tf.variable_scope(scope) as sc:
+        with tf.compat.v1.variable_scope(scope) as sc:
             self.scope = sc
         def speller_loss_fn(**kwargs):
             pick_masks = kwargs['pick_masks']
@@ -725,7 +725,7 @@ class WordTrainer(object):
         """
         add speller loss if not limited_vocab
         """
-        with tf.variable_scope(self.scope, reuse=True):
+        with tf.compat.v1.variable_scope(self.scope, reuse=True):
             speller_loss_fn = None if limited_vocab else self.speller_loss_fn
             loss, metrics = train_masked(
                 self.matcher,
@@ -756,7 +756,7 @@ class SentTrainer(object):
         """
         self.cell = cell
         self.word_trainer = word_trainer
-        with tf.variable_scope(scope) as sc:
+        with tf.compat.v1.variable_scope(scope) as sc:
             self.scope = sc
 
     def __call__(
@@ -773,7 +773,7 @@ class SentTrainer(object):
         """
         feed the inputs into cell, get the outputs, and then get the loss
         """
-        with tf.variable_scope(self.scope, reuse=True):
+        with tf.compat.v1.variable_scope(self.scope, reuse=True):
             speller_loss_fn = None if limited_vocab else self.word_trainer.speller_loss_fn
             loss, metrics = train_seq(
                 initial_state,
@@ -1138,7 +1138,7 @@ class SentGenerator(object):
         #             speller_initial_state, max_word_len)
         #         word_scores = tf.nn.softmax(word_scores)
         #         word_embeds, word_masks = self.word_embedder(word_ids)
-        #         word_masks = tf.logical_and(
+        #         word_masks = tf.math.logical_and(
         #             word_masks,
         #             tf.not_equal(word_scores, 0.0))
         #         word_ids = tf.pad(word_ids, [[0,0],[0,0],[0,max_word_len-tf.shape(word_ids)[2]]])
@@ -1376,7 +1376,7 @@ class ClassGenerator(object):
                     (static_word_embeds, None, 'embed'))
             else:
                 token_prior_logits = tf.expand_dims(
-                    tf.log(static_word_priors), axis=0)
+                    tf.math.log(static_word_priors), axis=0)
             extra_logits = sample_token_logits + token_prior_logits
 
             if do_attn:
@@ -1430,7 +1430,7 @@ class ClassGenerator(object):
         #             speller_initial_state, max_word_len)
         #         word_scores = tf.nn.softmax(word_scores)
         #         word_embeds, word_masks = self.word_embedder(word_ids)
-        #         word_masks = tf.logical_and(
+        #         word_masks = tf.math.logical_and(
         #             word_masks,
         #             tf.not_equal(word_scores, 0.0))
         #         word_ids = tf.pad(word_ids, [[0,0],[0,0],[0,max_word_len-tf.shape(word_ids)[2]]])
@@ -1499,7 +1499,7 @@ class ClassGenerator(object):
                     attn_logits *= attn_weights
                     copy_logits = tf.matmul(attn_logits, candidate_copy_logits)
                     logits += tf.reshape(copy_logits, [batch_size, copy_seq_length])
-                logits += tf.log(tf.cast(copy_valid_masks, tf.float32))
+                logits += tf.math.log(tf.cast(copy_valid_masks, tf.float32))
                 return copy_word_embeds, copy_word_ids, copy_valid_masks, logits
             candidates_fn_list.append(candidates_fn)
 
@@ -1537,7 +1537,7 @@ class GeneralCell(object):
         """
         self.assets = kwargs
         self.reuse = None
-        with tf.variable_scope(scope) as sc:
+        with tf.compat.v1.variable_scope(scope) as sc:
             self.scope=sc
 
     def __call__(self,
@@ -1548,7 +1548,7 @@ class GeneralCell(object):
             inputs: batch_size x input_dim or batch_size x length x input_dim
             state:
         """
-        with tf.variable_scope(self.scope, reuse=self.reuse):
+        with tf.compat.v1.variable_scope(self.scope, reuse=self.reuse):
             outputs, state = inputs, state
         self.reuse = True
         return outputs, state
@@ -1623,7 +1623,7 @@ class TransformerCell(GeneralCell):
             outputs: batch_size x layer_size or batch_size x length x layer_size
             state: TransformerState
         """
-        with tf.variable_scope(self.scope, reuse=self.reuse):
+        with tf.compat.v1.variable_scope(self.scope, reuse=self.reuse):
 
             batch_size = tf.shape(inputs)[0]
             to_squeeze = False
@@ -1762,7 +1762,7 @@ class SpellerCell(TransformerCell):
             outputs: batch_size x layer_size or batch_size x length x layer_size
             state: SpellerState
         """
-        with tf.variable_scope(self.scope, reuse=self.reuse):
+        with tf.compat.v1.variable_scope(self.scope, reuse=self.reuse):
 
             word_encodes = state.word_encodes
             field_query_embedding, \
@@ -1788,7 +1788,7 @@ class SpellerCell(TransformerCell):
         args:
             word_encodes: batch_size x word_layer_size
         """
-        with tf.variable_scope(self.scope):
+        with tf.compat.v1.variable_scope(self.scope):
 
             if self.cached.get(word_encodes) is None:
                 num_layers = self.assets['encoder'].num_layers
@@ -1829,7 +1829,7 @@ class Module(object):
         self.reuse = None
         self.dropout = dropout
         self.training = training
-        with tf.variable_scope(scope) as sc:
+        with tf.compat.v1.variable_scope(scope) as sc:
             self.scope = sc
 
 class Embedder(Module):
@@ -1856,7 +1856,7 @@ class Embedder(Module):
             word_embeds: batch_size x word_length x layer_size
             word_masks: batch_size x word_length
         """
-        with tf.variable_scope(self.scope, reuse=self.reuse):
+        with tf.compat.v1.variable_scope(self.scope, reuse=self.reuse):
 
             batch_size = tf.shape(segmented_seqs)[0]
             max_word_length = tf.shape(segmented_seqs)[1]
@@ -1883,7 +1883,7 @@ class Embedder(Module):
                 is_training=self.training,
                 scope="l1_convs")
             l1_embeds *= char_masks
-            char_embeds = tf.nn.max_pool(char_embeds, [1,1,2,1], [1,1,2,1], padding='SAME')
+            char_embeds = tf.nn.max_pool2d(char_embeds, [1,1,2,1], [1,1,2,1], padding='SAME')
             char_embeds = model_utils_py3.layer_norm(
                 char_embeds, begin_norm_axis=-1, is_training=self.training)
             char_masks = tf.reduce_any(tf.not_equal(char_embeds, 0.0), axis=-1, keepdims=True)
@@ -2011,7 +2011,7 @@ class Matcher(Module):
             logits: shape1 x shape2
         """
         assert(len(pair) == 2)
-        with tf.variable_scope(self.scope, reuse=self.reuse):
+        with tf.compat.v1.variable_scope(self.scope, reuse=self.reuse):
 
             def project(inputs, masks, input_type):
                 if input_type == 'context':
@@ -2071,7 +2071,7 @@ class Matcher(Module):
         args:
             contexts: num_candidates x encode_dim or batch_size x num_candidates x encode_dim
         """
-        with tf.variable_scope(self.scope, reuse=self.context_reuse):
+        with tf.compat.v1.variable_scope(self.scope, reuse=self.context_reuse):
 
             if self.cached_contexts.get(contexts) is None:
                 context_projs = model_utils_py3.GLU(
@@ -2092,7 +2092,7 @@ class Matcher(Module):
         args:
             encodes: num_candidates x encode_dim or batch_size x num_candidates x encode_dim
         """
-        with tf.variable_scope(self.scope, reuse=self.encode_reuse):
+        with tf.compat.v1.variable_scope(self.scope, reuse=self.encode_reuse):
 
             if self.cached_encodes.get(encodes) is None:
                 encode_projs = model_utils_py3.fully_connected(
@@ -2114,7 +2114,7 @@ class Matcher(Module):
         args:
             embeds: num_candidates x embed_dim or batch_size x num_candidates x embed_dim
         """
-        with tf.variable_scope(self.scope, reuse=self.embed_reuse):
+        with tf.compat.v1.variable_scope(self.scope, reuse=self.embed_reuse):
 
             if self.cached_embeds.get(embeds) is None:
                 embed_projs = model_utils_py3.fully_connected(
