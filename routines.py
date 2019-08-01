@@ -174,6 +174,8 @@ def predict(
         'data_schema': mapped_schema,
         'hyper_params': hyper_params,
     }
+    gen_num_cands = hyper_params.get('gen_num_cands')
+    gen_num_cands = 1 if gen_num_cands is None else gen_num_cands
 
     # build estimator
     lm = tf.estimator.Estimator(
@@ -204,21 +206,19 @@ def predict(
     data_path = os.path.join(model.train_dir, 'predictions')
     with open(data_path, 'w') as fwrite:
         for pred in predictions:
-            text_list = []
-            score_list = []
+            segment_list = []
             for feature_id in target_feature_ids:
-                seqs = pred[str(feature_id)+'-seqs']
-                segs = pred[str(feature_id)+'-segs']
-                scores = pred[str(feature_id)+'-scores']
+                cand_list = []
                 source_field_id = field_mapping[mapped_index[feature_id]['field_id']]
-                text = dataset.textify(source_field_id, seqs, segs)
-                text_list.append(text)
-                score_list.append(str(scores))
+                for k in range(gen_num_cands):
+                    seqs = pred[str(feature_id)+'-seqs-'+str(k)]
+                    segs = pred[str(feature_id)+'-segs-'+str(k)]
+                    scores = pred[str(feature_id)+'-scores-'+str(k)]
+                    text = dataset.textify(source_field_id, seqs, segs)
+                    cand_list.append(text+'@@@'+str(scores))
+                segment_list.append('|||'.join(cand_list))
             fwrite.write(
-                dataset.data_config['segment_delim'].join(text_list) + \
-                dataset.data_config['segment_delim'] + \
-                dataset.data_config['segment_delim'].join(score_list) + \
-                '\n')
+                dataset.data_config['segment_delim'].join(segment_list) + '\n')
 
 def export(
     dataset,

@@ -1465,6 +1465,7 @@ class Model(object):
                 'pct_start': 0~1,
                 'dropout': 0~1,
                 'wd': float,
+                'gen_num_cands': int,
             },
             schedule: '1cycle'|'lr_finder'
             num_steps: int
@@ -1474,6 +1475,8 @@ class Model(object):
         data_index = params['data_index']
         data_schema = params['data_schema']
         hyper_params = params['hyper_params']
+        gen_num_cands = hyper_params.get('gen_num_cands')
+        gen_num_cands = 1 if gen_num_cands is None else gen_num_cands
 
         task_config = self.task_config
         task_spec = task_config['task_spec']
@@ -1892,6 +1895,11 @@ class Model(object):
                             features[str(i)+'-segs'] = tf.zeros([batch_size, 0])
                             feature['segmented_seqs'] = tf.gather(
                                 token_ids, features[str(i)+'-seqs'])
+                            for k in range(gen_num_cands):
+                                # add to predictions
+                                predictions[str(i)+'-seqs-'+str(k)] = seqs[:,k]
+                                predictions[str(i)+'-segs-'+str(k)] = tf.zeros([batch_size, 0])
+                                predictions[str(i)+'-scores-'+str(k)] = scores[:,k]
                         else:
                             if candidate_embeds is None:
                                 sep_ids = tf.constant(
@@ -1958,6 +1966,13 @@ class Model(object):
                                 feature['segmented_seqs'])
                             features[str(i)+'-segs'] = tf.pad(
                                 features[str(i)+'-segs'], [[0,0],[1,1]], constant_values=1.0)
+                            for k in range(gen_num_cands):
+                                # add to predictions
+                                seqs, segs = model_utils_py3.stitch_chars(seqs[:,k])
+                                segs = tf.pad(segs, [[0,0],[1,1]], constant_values=1.0)
+                                predictions[str(i)+'-seqs-'+str(k)] = seqs
+                                predictions[str(i)+'-segs-'+str(k)] = segs
+                                predictions[str(i)+'-scores-'+str(k)] = scores[:,k]
                     elif feature_type == 'class':
                         tfstruct = model_utils_py3.TransformerStruct(
                             field_query_embeds=tuple(tf.split(
@@ -2001,11 +2016,17 @@ class Model(object):
                                 static_word_ids=word_ids, static_word_embeds=word_embedding,
                                 static_word_priors=word_priors,
                                 copy_word_ids=copy_word_ids, copy_word_embeds=copy_word_embeds,
-                                copy_valid_masks=copy_valid_masks)
+                                copy_valid_masks=copy_valid_masks,
+                                num_candidates=gen_num_cands)
                             features[str(i)+'-seqs'] = classes[:,0]
                             features[str(i)+'-segs'] = tf.zeros([batch_size, 0])
                             feature['segmented_seqs'] = tf.gather(
                                 token_ids, features[str(i)+'-seqs'])
+                            for k in range(gen_num_cands):
+                                # add to predictions
+                                predictions[str(i)+'-seqs-'+str(k)] = classes[:,k]
+                                predictions[str(i)+'-segs-'+str(k)] = tf.zeros([batch_size, 0])
+                                predictions[str(i)+'-scores-'+str(k)] = scores[:,k]
                         else:
                             if candidate_embeds is None:
                                 classes, scores = class_generator.generate(
@@ -2014,7 +2035,8 @@ class Model(object):
                                     attn_encodes, attn_valid_masks,
                                     global_encodes, field_prior_embeds,
                                     copy_word_ids=copy_word_ids, copy_word_embeds=copy_word_embeds,
-                                    copy_valid_masks=copy_valid_masks)
+                                    copy_valid_masks=copy_valid_masks,
+                                    num_candidates=gen_num_cands)
                             else:
                                 unk_ids = tf.constant(
                                     [[self.char_vocab.token2id[self.char_vocab.unk]]],
@@ -2034,17 +2056,20 @@ class Model(object):
                                     global_encodes, field_prior_embeds,
                                     static_word_ids=candidate_ids, static_word_embeds=candidate_embeds,
                                     copy_word_ids=copy_word_ids, copy_word_embeds=copy_word_embeds,
-                                    copy_valid_masks=copy_valid_masks)
-                            feature['segmented_seqs'] = seqs[:,0]
+                                    copy_valid_masks=copy_valid_masks,
+                                    num_candidates=gen_num_cands)
+                            feature['segmented_seqs'] = classes[:,0]
                             features[str(i)+'-seqs'], features[str(i)+'-segs'] = model_utils_py3.stitch_chars(
                                 feature['segmented_seqs'])
                             features[str(i)+'-segs'] = tf.pad(
                                 features[str(i)+'-segs'], [[0,0],[1,1]], constant_values=1.0)
-
-                    # add to predictions
-                    predictions[str(i)+'-seqs'] = features[str(i)+'-seqs']
-                    predictions[str(i)+'-segs'] = features[str(i)+'-segs']
-                    predictions[str(i)+'-scores'] = scores[:,0]
+                            for k in range(gen_num_cands):
+                                # add to predictions
+                                seqs, segs = model_utils_py3.stitch_chars(classes[:,k])
+                                segs = tf.pad(segs, [[0,0],[1,1]], constant_values=1.0)
+                                predictions[str(i)+'-seqs-'+str(k)] = seqs
+                                predictions[str(i)+'-segs-'+str(k)] = segs
+                                predictions[str(i)+'-scores-'+str(k)] = scores[:,k]
 
                     if tlevel < max_target_level:
                         # embed words

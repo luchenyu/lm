@@ -518,6 +518,10 @@ def train_masked(
             labels=tf.stop_gradient(labels),
             logits=logits)
         context_token_loss += tf.reduce_sum(labels*tf.math.log(labels+1e-12))
+        context_token_loss_dumb = tf.nn.softmax_cross_entropy_with_logits_v2(
+            labels=tf.ones_like(labels)/tf.cast(num_picks*num_candidates, tf.float32),
+            logits=logits)
+        context_token_loss = 0.9*context_token_loss + 0.1*context_token_loss_dumb
         # total loss
         loss = context_token_loss + extra_loss
         return loss
@@ -1326,7 +1330,8 @@ class ClassGenerator(object):
         static_word_priors=None,
         gen_word_len=None,
         copy_word_ids=None, copy_word_embeds=None,
-        copy_valid_masks=None):
+        copy_valid_masks=None,
+        num_candidates=1):
         """
         args:
             max_word_len: int
@@ -1506,8 +1511,10 @@ class ClassGenerator(object):
         concat_embeds, concat_ids, concat_masks, concat_logits = concat_candidates(
             word_encodes, candidates_fn_list=candidates_fn_list)
 
-        indices = tf.argmax(concat_logits, 1, output_type=tf.int32)
-        batch_indices = tf.stack([tf.range(batch_size, dtype=tf.int32), indices], axis=1)
+        _, indices = tf.math.top_k(concat_logits, k=num_candidates)
+        batch_indices = tf.stack([
+            tf.tile(tf.expand_dims(tf.range(batch_size, dtype=tf.int32), axis=1), [1,num_candidates]),
+            indices], axis=2)
         if len(concat_embeds.get_shape()) == 2:
             classes = tf.gather(concat_ids, indices)
         elif len(concat_embeds.get_shape()) == 3:
@@ -1515,8 +1522,7 @@ class ClassGenerator(object):
         concat_probs = tf.cast(concat_masks, dtype=tf.float32)*tf.nn.softmax(concat_logits)
         concat_probs /= tf.reduce_sum(concat_probs, axis=-1, keepdims=True)
         scores = tf.gather_nd(concat_probs, batch_indices)
-        classes = tf.expand_dims(tf.expand_dims(classes, axis=1), axis=1)
-        scores = tf.expand_dims(scores, axis=1)
+        classes = tf.expand_dims(classes, axis=-1)
         return classes, scores
 
 
