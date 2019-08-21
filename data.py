@@ -337,14 +337,15 @@ class Dataset(object):
         for pred in resp['predictions']:
             mapped_segments = []
             for i in range(len(mapped_index)):
-                seqs = pred.get(str(i)+'-seqs')
-                segs = pred.get(str(i)+'-segs')
+                seqs = pred.get(str(i)+'-seqs-0')
+                segs = pred.get(str(i)+'-segs-0')
+                score = pred.get(str(i)+'-scores-0')
                 if not seqs is None:
                     segment_id = mapped_index[i]['segment_id']
                     field_id = self.data_config['data_index'][segment_id]['field_id']
                     text = self.textify(field_id, seqs, segs)
                 else:
                     text = ''
-                mapped_segments.append(text)
+                mapped_segments.append((text, score))
             mapped_segments_list.append(mapped_segments)
         return mapped_segments_list
