@@ -24,6 +24,7 @@ def get_optimizer(
     """
     with tf.compat.v1.variable_scope("scheduler"):
 
+        Optimizer = model_utils_py3.RAdamOptimizer
         if schedule == '1cycle':
             """ 1cycle schedule """
             max_lr = float(max_lr)
@@ -38,7 +39,7 @@ def get_optimizer(
                 tf.less(x, pct_start),
                 lambda: 0.95 + (0.85 - 0.95)*(x/pct_start),
                 lambda: -0.05*tf.math.cos((x-pct_start)/(1.0-pct_start)*math.pi) + 0.9)
-            optimizer = model_utils_py3.LAMBOptimizer(
+            optimizer = Optimizer(
                 learning_rate=learning_rate,
                 beta1=0.95,
                 beta1_t=momentum,
@@ -49,13 +50,13 @@ def get_optimizer(
             x = (tf.cast(global_step, tf.float32) % float(num_steps)) / float(num_steps)
             log_lr = -7.0 + x*(1.0 - (-7.0))
             learning_rate = tf.pow(10.0, log_lr)
-            optimizer = model_utils_py3.LAMBOptimizer(
+            optimizer = Optimizer(
                 learning_rate=learning_rate,
                 beta1=0.9,
                 beta2=0.999,
                 wd=wd)
         else:
-            optimizer = model_utils_py3.LAMBOptimizer(
+            optimizer = Optimizer(
                 learning_rate=max_lr,
                 beta1=0.9,
                 beta2=0.999,
