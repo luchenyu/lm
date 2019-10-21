@@ -24,7 +24,7 @@ def get_optimizer(
     """
     with tf.compat.v1.variable_scope("scheduler"):
 
-        Optimizer = model_utils_py3.RAdamOptimizer
+        Optimizer = model_utils_py3.RangerOptimizer
         if schedule == '1cycle':
             """ 1cycle schedule """
             max_lr = float(max_lr)
@@ -522,7 +522,7 @@ def train_masked(
         context_token_loss_dumb = tf.nn.softmax_cross_entropy_with_logits_v2(
             labels=tf.ones_like(labels)/tf.cast(num_picks*num_candidates, tf.float32),
             logits=logits)
-        context_token_loss = 0.9*context_token_loss + 0.1*context_token_loss_dumb
+#         context_token_loss = 0.9*context_token_loss + 0.1*context_token_loss_dumb
         # total loss
         loss = context_token_loss + extra_loss
         return loss
@@ -544,10 +544,10 @@ def train_masked(
         labels = tf.one_hot(groundtruths, num_candidates, axis=0)
         predictions = tf.one_hot(predictions, num_candidates, axis=0)
         for i in range(num_candidates):
-            precisions.append(tf.metrics.precision(
+            precisions.append(tf.compat.v1.metrics.precision(
                 labels=labels[i],
                 predictions=predictions[i]))
-            recalls.append(tf.metrics.recall(
+            recalls.append(tf.compat.v1.metrics.recall(
                 labels=labels[i],
                 predictions=predictions[i]))
     else:
@@ -1877,7 +1877,7 @@ class Embedder(Module):
                 char_embeds,
                 self.layer_size,
                 init_scale=1.0,
-                activation_fn=tf.nn.relu,
+                activation_fn=model_utils_py3.gelu,
                 is_training=self.training,
                 scope="l0_convs")
             l0_embeds *= char_masks
@@ -1886,7 +1886,7 @@ class Embedder(Module):
                 [self.layer_size]*2,
                 [[1,2],[1,3]],
                 init_scale=1.0,
-                activation_fn=tf.nn.relu,
+                activation_fn=model_utils_py3.gelu,
                 is_training=self.training,
                 scope="l1_convs")
             l1_embeds *= char_masks
@@ -1900,7 +1900,7 @@ class Embedder(Module):
                 [self.layer_size]*2,
                 [[1,2],[1,3]],
                 init_scale=1.0,
-                activation_fn=tf.nn.relu,
+                activation_fn=model_utils_py3.gelu,
                 is_training=self.training,
                 scope="l2_convs")
             l2_embeds *= char_masks
