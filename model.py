@@ -28,7 +28,7 @@ class LRFinderHook(tf.estimator.SessionRunHook):
     def after_create_session(self, session, coord):
         pass
 
-    def before_run(self, run_context):        
+    def before_run(self, run_context):
         return tf.estimator.SessionRunArgs(self.fetches)
 
     def after_run(self, run_context, run_values):
@@ -54,6 +54,40 @@ class LRFinderHook(tf.estimator.SessionRunHook):
     def end(self, session):
         self.fig.show()
         self.fig.canvas.draw()
+
+class TrainHook(tf.estimator.SessionRunHook):
+    def __init__(
+        self,
+        accum_op,
+        update_op,
+        update_every):
+        tf.compat.v1.logging.info('Create TrainHook.')
+        self.accum_op = accum_op
+        self.update_op = update_op
+        self.update_every = update_every
+        self.counter = 0
+        self.run_accum = tf.estimator.SessionRunArgs([self.accum_op])
+        self.run_update = tf.estimator.SessionRunArgs([self.update_op])
+
+    def begin(self):
+        pass
+
+    def after_create_session(self, session, coord):
+        pass
+
+    def before_run(self, run_context):
+        self.counter += 1
+        if self.counter % self.update_every == 0:
+            self.counter = 0
+            return self.run_update
+        else:
+            return self.run_accum
+
+    def after_run(self, run_context, run_values):
+        pass
+
+    def end(self, session):
+        pass
 
 
 """ lm model """
@@ -805,19 +839,21 @@ class Model(object):
             ]
         else:
             var_list = None
-        train_op = model_utils_py3.optimize_loss(
+        update_every = hyper_params.get('update_every')
+        update_every = 1 if update_every is None else update_every
+        dumb_op, accum_op, update_op = model_utils_py3.optimize_loss(
             loss_train,
             global_step,
             optimizer,
+            update_every,
             var_list=var_list,
-            update_every=hyper_params.get('update_every'),
             scope=None)
-        hooks = []
+        hooks = [TrainHook(accum_op, update_op, update_every)]
         if params.get('schedule') == 'lr_finder':
             fetches = {'global_step': global_step, 'learning_rate': optimizer._lr_t, 'loss': loss_show}
             hooks.append(LRFinderHook(fetches, params['num_steps']))
         return tf.estimator.EstimatorSpec(
-            tf.estimator.ModeKeys.TRAIN, loss=loss_show, train_op=train_op, training_hooks=hooks)
+            tf.estimator.ModeKeys.TRAIN, loss=loss_show, train_op=dumb_op, training_hooks=hooks)
 
     def eval_fn(
         self,
